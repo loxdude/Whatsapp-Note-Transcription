@@ -2,11 +2,12 @@ package com.local.voicenotes.model
 
 import android.content.Context
 import android.net.Uri
+import android.provider.OpenableColumns
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.local.voicenotes.domain.ImportedModel
-import com.local.voicenotes.inference.NativeQwenBridge
+import com.local.voicenotes.inference.NativeParakeetBridge
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -14,10 +15,12 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.security.MessageDigest
 
-private val Context.modelDataStore by preferencesDataStore("models")
+// Versioned deliberately: the prior registry used a different model format.
+private val Context.modelDataStore by preferencesDataStore("models_v2")
 
 class ModelRepository(private val context: Context) {
     private val modelsKey = stringPreferencesKey("imported_models")
@@ -32,19 +35,20 @@ class ModelRepository(private val context: Context) {
     suspend fun select(id: String) = context.modelDataStore.edit { it[selectedKey] = id }
 
     suspend fun import(uri: Uri, onProgress: (Float) -> Unit): ImportedModel = withContext(Dispatchers.IO) {
-        val sourceLength = context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length }
-            ?: error("Cannot inspect the selected model.")
-        require(sourceLength > 0) { "The selected model has no readable size." }
         val modelsDir = File(context.filesDir, "models").apply { mkdirs() }
-        val usable = context.filesDir.usableSpace
-        require(usable > sourceLength + 256L * 1024L * 1024L) {
-            "Not enough free space. Keep at least 256 MB free after importing the model."
-        }
         val partial = File(modelsDir, "import-${System.nanoTime()}.partial")
         val digest = MessageDigest.getInstance("SHA-256")
         try {
-            context.contentResolver.openInputStream(uri)?.use { input ->
-                FileOutputStream(partial).use { output ->
+            var sourceLength = -1L
+            context.contentResolver.openFileDescriptor(uri, "r")?.use { descriptor ->
+                sourceLength = descriptor.statSize
+                require(sourceLength >= 300L * 1024L * 1024L) {
+                    "This is not a complete Parakeet model. Select the 416 MB ggml-parakeet .bin file itself."
+                }
+                require(context.filesDir.usableSpace > sourceLength + 256L * 1024L * 1024L) {
+                    "Not enough free space. Keep at least 256 MB free after importing the model."
+                }
+                FileInputStream(descriptor.fileDescriptor).use { input -> FileOutputStream(partial).use { output ->
                     val buffer = ByteArray(1024 * 1024)
                     var copied = 0L
                     while (true) {
@@ -56,35 +60,39 @@ class ModelRepository(private val context: Context) {
                         onProgress((copied.toFloat() / sourceLength).coerceIn(0f, 1f))
                     }
                     output.fd.sync()
-                }
-            } ?: error("Cannot read the selected model.")
+                } }
+            } ?: error("Cannot open the selected model.")
             require(partial.length() == sourceLength) { "Model import was incomplete." }
-            val metadata = GgufMetadataReader.read(partial)
+
             val hash = digest.digest().joinToString("") { "%02x".format(it) }
-            val destination = File(modelsDir, "$hash.gguf")
+            val destination = File(modelsDir, "$hash.bin")
             if (!destination.exists()) require(partial.renameTo(destination)) { "Could not finalize model import." }
             else partial.delete()
-            val backend = runCatching { NativeQwenBridge.detectBackend(destination.absolutePath) }.getOrDefault("")
-            val enabled = backend == "qwen3"
-            val isProjector = metadata.name.contains("mmproj", true) || destination.length() < 300_000_000L
-            val note = when {
-                enabled -> "Ready for fully offline transcription"
-                isProjector -> "Audio projector detected; paired llama.cpp models are not supported by the pinned runtime"
-                backend.isNotBlank() -> "Detected backend '$backend' is experimental and disabled"
-                else -> "This GGUF layout is not supported by the pinned Qwen runtime"
+
+            val enabled = NativeParakeetBridge.isSupportedModel(destination.absolutePath)
+            val sourceName = context.contentResolver.query(
+                uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null
+            )?.use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+                ?: uri.lastPathSegment
+                ?: "Parakeet model"
+            val note = if (enabled) {
+                "Ready: whisper.cpp Parakeet, fully offline"
+            } else {
+                "Not a supported whisper.cpp Parakeet ggml .bin model."
             }
             val model = ImportedModel(
                 id = hash,
-                displayName = metadata.name.ifBlank { "Qwen3-ASR model" },
+                displayName = sourceName.takeIf { it.contains("parakeet", ignoreCase = true) }
+                    ?.removeSuffix(".bin")
+                    ?: "Parakeet TDT 0.6B v3",
                 path = destination.absolutePath,
                 sizeBytes = destination.length(),
-                architecture = metadata.architecture,
-                backend = backend,
+                architecture = "parakeet",
+                backend = "parakeet",
                 enabled = enabled,
                 note = note
             )
-            val updated = (models().filterNot { it.id == hash } + model).sortedByDescending { it.enabled }
-            save(updated)
+            save((models().filterNot { it.id == hash } + model).sortedByDescending { it.enabled })
             if (enabled) select(hash)
             onProgress(1f)
             model

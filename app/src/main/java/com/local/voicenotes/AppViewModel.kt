@@ -10,7 +10,7 @@ import com.local.voicenotes.domain.ImportedModel
 import com.local.voicenotes.domain.LanguageOption
 import com.local.voicenotes.domain.TranscriptionProgress
 import com.local.voicenotes.domain.TranscriptionResult
-import com.local.voicenotes.inference.QwenBackend
+import com.local.voicenotes.inference.ParakeetBackend
 import com.local.voicenotes.model.ModelRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -41,11 +41,13 @@ data class AppUiState(
 class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = ModelRepository(application)
     private val decoder = AndroidAudioDecoder(application.contentResolver)
-    private val backend = QwenBackend()
+    private val backend = ParakeetBackend()
     private val mutableState = MutableStateFlow(AppUiState())
     val state: StateFlow<AppUiState> = mutableState.asStateFlow()
     private var activeJob: Job? = null
     private var clockJob: Job? = null
+    private var preloadJob: Job? = null
+    private var preloadedModelId: String? = null
 
     init { refreshModels() }
 
@@ -55,6 +57,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val selected = models.firstOrNull { it.id == saved && it.enabled }?.id
             ?: models.firstOrNull { it.enabled }?.id
         mutableState.value = mutableState.value.copy(models = models, selectedModelId = selected)
+        models.firstOrNull { it.id == selected }?.let(::preload)
     }
 
     fun setAudio(uri: Uri) {
@@ -74,6 +77,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun selectModel(id: String) {
         mutableState.value = mutableState.value.copy(selectedModelId = id)
         viewModelScope.launch { repository.select(id) }
+        mutableState.value.selectedModel?.let(::preload)
     }
 
     fun importModel(uri: Uri) {
@@ -85,10 +89,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     mutableState.value = mutableState.value.copy(progress = TranscriptionProgress.Importing(fraction))
                 }
                 refreshModels().join()
-                mutableState.value = mutableState.value.copy(
-                    progress = if (model.enabled) TranscriptionProgress.Idle
-                    else TranscriptionProgress.Failed(model.note)
-                )
+                if (!model.enabled) {
+                    mutableState.value = mutableState.value.copy(progress = TranscriptionProgress.Failed(model.note))
+                }
             } catch (t: Throwable) {
                 mutableState.value = mutableState.value.copy(
                     progress = TranscriptionProgress.Failed(t.message ?: "Model import failed.")
@@ -152,6 +155,27 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         mutableState.value = mutableState.value.copy(transcript = value)
     }
 
+    private fun preload(model: ImportedModel) {
+        if (!model.enabled || preloadedModelId == model.id) return
+        preloadJob?.cancel()
+        preloadJob = viewModelScope.launch {
+            try {
+                mutableState.value = mutableState.value.copy(progress = TranscriptionProgress.LoadingModel)
+                backend.preload(model).getOrThrow()
+                preloadedModelId = model.id
+                if (mutableState.value.selectedModelId == model.id) {
+                    mutableState.value = mutableState.value.copy(progress = TranscriptionProgress.Idle)
+                }
+            } catch (t: Throwable) {
+                if (mutableState.value.selectedModelId == model.id) {
+                    mutableState.value = mutableState.value.copy(
+                        progress = TranscriptionProgress.Failed(t.message ?: "Model preload failed.")
+                    )
+                }
+            }
+        }
+    }
+
     private fun startClock(started: Long) {
         clockJob?.cancel()
         clockJob = viewModelScope.launch {
@@ -168,4 +192,3 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         super.onCleared()
     }
 }
-

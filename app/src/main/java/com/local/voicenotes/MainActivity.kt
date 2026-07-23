@@ -125,7 +125,7 @@ private fun TranscriberScreen(state: AppUiState, viewModel: AppViewModel) {
                         onValueChange = {}, readOnly = true,
                         trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },
                         modifier = Modifier.menuAnchor().fillMaxWidth(),
-                        label = { Text("Qwen model") }
+                        label = { Text("ASR model") }
                     )
                     DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
                         state.models.forEach { model ->
@@ -144,7 +144,7 @@ private fun TranscriberScreen(state: AppUiState, viewModel: AppViewModel) {
                     }
                 }
                 TextButton(onClick = { modelPicker.launch(arrayOf("application/octet-stream", "*/*")) },
-                    enabled = !state.busy) { Text("Import GGUF model") }
+                    enabled = !state.busy) { Text("Import Parakeet .bin model") }
             }
 
             SectionCard("Language") {

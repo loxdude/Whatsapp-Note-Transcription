@@ -1,2 +1,1 @@
--keep class com.local.voicenotes.inference.NativeQwenBridge { *; }
-
+-keep class com.local.voicenotes.inference.NativeParakeetBridge { *; }

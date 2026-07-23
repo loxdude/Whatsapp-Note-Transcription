@@ -23,14 +23,14 @@ android {
                 arguments += listOf(
                     "-DANDROID_STL=c++_shared",
                     "-DBUILD_SHARED_LIBS=OFF",
-                    "-DCRISPASR_BUILD_EXAMPLES=OFF",
-                    "-DCRISPASR_BUILD_TESTS=OFF",
-                    "-DCRISPASR_BUILD_SERVER=OFF",
-                    "-DCRISPASR_CURL=OFF",
-                    "-DCRISPASR_MEDIA_NDK=OFF",
+                    "-DWHISPER_BUILD_EXAMPLES=OFF",
+                    "-DWHISPER_BUILD_TESTS=OFF",
+                    "-DWHISPER_BUILD_SERVER=OFF",
+                    "-DWHISPER_CURL=OFF",
                     "-DGGML_OPENMP=OFF",
                     "-DGGML_LLAMAFILE=OFF",
-                    "-DGGML_NATIVE=OFF"
+                    "-DGGML_NATIVE=OFF",
+                    "-DGGML_VULKAN=ON"
                 )
             }
         }
