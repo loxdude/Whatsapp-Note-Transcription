@@ -1,0 +1,23 @@
+cmake_minimum_required(VERSION 3.22.1)
+project(voicenote_jni LANGUAGES C CXX)
+
+set(CRISPASR_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../../third_party/CrispASR")
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(CRISPASR_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(CRISPASR_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(CRISPASR_BUILD_SERVER OFF CACHE BOOL "" FORCE)
+set(CRISPASR_CURL OFF CACHE BOOL "" FORCE)
+set(CRISPASR_MEDIA_NDK OFF CACHE BOOL "" FORCE)
+set(CRISPASR_NO_C2PA_NATIVE ON CACHE BOOL "" FORCE)
+set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
+set(GGML_LLAMAFILE OFF CACHE BOOL "" FORCE)
+set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
+set(CMAKE_INSTALL_BINDIR "bin" CACHE PATH "" FORCE)
+set(CMAKE_INSTALL_LIBDIR "lib" CACHE PATH "" FORCE)
+set(CMAKE_INSTALL_INCLUDEDIR "include" CACHE PATH "" FORCE)
+
+add_subdirectory("${CRISPASR_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/crispasr")
+
+add_library(voicenote_jni SHARED native_qwen_bridge.cpp)
+target_include_directories(voicenote_jni PRIVATE "${CRISPASR_DIR}/include")
+target_link_libraries(voicenote_jni PRIVATE crispasr-lib android log)
