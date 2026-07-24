@@ -53,6 +53,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val state: StateFlow<AppUiState> = mutableState.asStateFlow()
     private var activeJob: Job? = null
     private var clockJob: Job? = null
+    private var prepareJob: Job? = null
 
     init {
         preferences.getString("uri", null)?.let { saved ->
@@ -67,6 +68,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val selected = models.firstOrNull { it.id == saved && it.enabled }?.id
             ?: models.firstOrNull { it.enabled }?.id
         mutableState.value = mutableState.value.copy(models = models, selectedModelId = selected)
+        models.firstOrNull { it.id == selected }?.let(::prepareModel)
     }
 
     fun setAudio(uri: Uri, persist: Boolean = true) {
@@ -91,7 +93,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectModel(id: String) {
         mutableState.value = mutableState.value.copy(selectedModelId = id)
+        val selected = mutableState.value.models.firstOrNull { it.id == id } ?: return
         viewModelScope.launch { repository.select(id) }
+        prepareModel(selected)
     }
 
     fun importModel(uri: Uri) {
@@ -187,6 +191,28 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 mutableState.value = mutableState.value.copy(elapsedMillis = System.currentTimeMillis() - started)
                 delay(250.milliseconds)
             }
+        }
+    }
+
+    private fun prepareModel(model: ImportedModel) {
+        prepareJob?.cancel()
+        prepareJob = viewModelScope.launch {
+            if (mutableState.value.selectedModelId != model.id) return@launch
+            mutableState.value = mutableState.value.copy(progress = TranscriptionProgress.LoadingModel)
+            backend.prepare(model).fold(
+                onSuccess = {
+                    if (mutableState.value.selectedModelId == model.id) {
+                        mutableState.value = mutableState.value.copy(progress = TranscriptionProgress.Idle)
+                    }
+                },
+                onFailure = { error ->
+                    if (mutableState.value.selectedModelId == model.id) {
+                        mutableState.value = mutableState.value.copy(
+                            progress = TranscriptionProgress.Failed(error.message ?: "Model preparation failed.")
+                        )
+                    }
+                }
+            )
         }
     }
 

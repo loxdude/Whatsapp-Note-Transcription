@@ -39,6 +39,9 @@ class LiteRtParakeetBackend(private val context: Context) : TranscriptionBackend
 
     @Volatile private var cancelled = false
     @Volatile private var activeSession: Session? = null
+    @Volatile private var preparedModelId: String? = null
+    @Volatile private var preparedSession: Session? = null
+    private val sessionLock = Any()
     private val assets by lazy { ParakeetAssets.load(context) }
     private val frontend by lazy { ParakeetFeatureExtractor(assets) }
 
@@ -56,6 +59,15 @@ class LiteRtParakeetBackend(private val context: Context) : TranscriptionBackend
         }
     }
 
+    override suspend fun prepare(model: ImportedModel): Result<Unit> =
+        withContext(Dispatchers.Default) {
+            runCatching {
+                validate(model).getOrThrow()
+                sessionFor(model)
+                Unit
+            }
+        }
+
     override suspend fun transcribe(
         model: ImportedModel,
         pcm16KhzMono: FloatArray,
@@ -67,13 +79,8 @@ class LiteRtParakeetBackend(private val context: Context) : TranscriptionBackend
         @Suppress("UNUSED_VARIABLE") val selectedLanguage = language
         cancelled = false
         val totalStarted = SystemClock.elapsedRealtimeNanos()
-        val modelFileStarted = SystemClock.elapsedRealtimeNanos()
-        val modelFile = openModelFile(model)
-        val modelFileMillis = elapsedMillis(modelFileStarted)
-        val sessionStarted = SystemClock.elapsedRealtimeNanos()
-        val session = Session(context, modelFile)
-        val sessionMillis = elapsedMillis(sessionStarted)
-        Log.i(TAG, "modelFile=${modelFileMillis}ms session=${sessionMillis}ms audioSamples=${pcm16KhzMono.size}")
+        val session = sessionFor(model)
+        Log.i(TAG, "reusePreparedSession=true audioSamples=${pcm16KhzMono.size}")
         activeSession = session
         try {
             val emitted = ArrayList<Int>()
@@ -165,7 +172,6 @@ class LiteRtParakeetBackend(private val context: Context) : TranscriptionBackend
             }
         } finally {
             activeSession = null
-            session.close()
         }
     }
 
@@ -176,6 +182,23 @@ class LiteRtParakeetBackend(private val context: Context) : TranscriptionBackend
 
     private fun elapsedMillis(startedNanos: Long): Long =
         (SystemClock.elapsedRealtimeNanos() - startedNanos) / 1_000_000
+
+    private fun sessionFor(model: ImportedModel): Session = synchronized(sessionLock) {
+        preparedSession?.let { existing ->
+            if (preparedModelId == model.id) return@synchronized existing
+            existing.close()
+        }
+        val modelFileStarted = SystemClock.elapsedRealtimeNanos()
+        val modelFile = openModelFile(model)
+        val modelFileMillis = elapsedMillis(modelFileStarted)
+        val sessionStarted = SystemClock.elapsedRealtimeNanos()
+        val created = Session(context, modelFile)
+        val sessionMillis = elapsedMillis(sessionStarted)
+        preparedModelId = model.id
+        preparedSession = created
+        Log.i(TAG, "prepared modelFile=${modelFileMillis}ms session=${sessionMillis}ms model=${model.displayName}")
+        created
+    }
 
     private fun detokenize(ids: List<Int>): String {
         val output = StringBuilder()
@@ -207,8 +230,14 @@ class LiteRtParakeetBackend(private val context: Context) : TranscriptionBackend
 
     override fun close() {
         cancelled = true
-        activeSession?.close()
+        val active = activeSession
         activeSession = null
+        synchronized(sessionLock) {
+            if (preparedSession !== active) active?.close()
+            preparedSession?.close()
+            preparedSession = null
+            preparedModelId = null
+        }
     }
 
     private fun openModel(model: ImportedModel): MappedByteBuffer {

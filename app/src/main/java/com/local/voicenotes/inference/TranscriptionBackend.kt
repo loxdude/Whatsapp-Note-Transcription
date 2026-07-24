@@ -5,6 +5,7 @@ import com.local.voicenotes.domain.LanguageOption
 
 interface TranscriptionBackend : AutoCloseable {
     suspend fun validate(model: ImportedModel): Result<Unit>
+    suspend fun prepare(model: ImportedModel): Result<Unit> = validate(model)
     suspend fun transcribe(
         model: ImportedModel,
         pcm16KhzMono: FloatArray,
