@@ -6,9 +6,9 @@ A high-performance **offline** Android app for transcribing voice notes using **
 
 ## ✨ Features
 
-- **Offline Transcription**: No internet required—fully local processing.
+- **Offline Transcription**: No internet required, fully local processing.
 - **NPU Acceleration**: Leverages **Qualcomm’s QNN runtime** via **LiteRT** for low-latency inference.
-- **Multi-Format Support**: Works with **WhatsApp OGG/Opus, MP3, M4A, AAC, WAV** (up to 15 minutes).
+- **Multi-Format Support**: Works with **WhatsApp Opus, MP3, M4A, AAC, WAV** (up to 15 minutes).
 - **Multi-Language**: Auto-detect or manually select from **13 languages** (German, English, Spanish, French, Italian, Portuguese, Dutch, Polish, Turkish, Japanese, Korean, Chinese).
 - **Model Management**: Import custom **TFLite models** (e.g., `parakeet_tdt_0.6b_v3_5s_f32_stateful_Qualcomm_SM8650.tflite`).
 - **Benchmarking**: Logs audio decode time, inference latency, and total processing time.
@@ -34,11 +34,11 @@ cd Transcriber-android-litert
 ```
 
 ### 2. Add the Default Model
-Place the **Parakeet TDT v3** model in the project root:
+Place the **Parakeet TDT v3** model anywhere on your phone (where the android file selector has access to):
 ```
 parakeet_tdt_0.6b_v3_5s_f32_stateful_Qualcomm_SM8650.tflite
 ```
-*Download the model from the [releases](https://github.com/your-repo/releases) or use your own compatible TFLite model.*
+*Download the model from [Huggingface](https://huggingface.co/litert-community/parakeet-tdt-0.6b-v3/tree/main)*
 
 ### 3. Build the App
 ```bash
@@ -138,11 +138,7 @@ To use a custom model:
 
 ## 🤝 Contributing
 
-1. Fork the repository.
-2. Create a feature branch (`git checkout -b feature/your-feature`).
-3. Commit your changes (`git commit -am 'Add new feature'`).
-4. Push to the branch (`git push origin feature/your-feature`).
-5. Open a Pull Request.
+Do whatever you want, this repo is not tha serious.
 
 ---
 
