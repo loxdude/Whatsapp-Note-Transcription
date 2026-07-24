@@ -5,4 +5,8 @@ local.properties
 *.iml
 captures/
 .cxx/
+*.tflite
+.tmp-*
+tools/*.class
+.gitconfig-codex
 

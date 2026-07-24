@@ -101,8 +101,8 @@ private fun TranscriberScreen(state: AppUiState, viewModel: AppViewModel) {
             modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            Text("Voice notes, readable.", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-            Text("Everything stays on this phone.", color = Color(0xFF60665E))
+            Text("Voice notes · LiteRT", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+            Text("Parakeet TDT v3 on the Snapdragon NPU.", color = Color(0xFF60665E))
 
             SectionCard("Audio") {
                 OutlinedButton(
@@ -125,7 +125,7 @@ private fun TranscriberScreen(state: AppUiState, viewModel: AppViewModel) {
                         onValueChange = {}, readOnly = true,
                         trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },
                         modifier = Modifier.menuAnchor().fillMaxWidth(),
-                        label = { Text("Qwen model") }
+                        label = { Text("LiteRT model") }
                     )
                     DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
                         state.models.forEach { model ->
@@ -144,7 +144,7 @@ private fun TranscriberScreen(state: AppUiState, viewModel: AppViewModel) {
                     }
                 }
                 TextButton(onClick = { modelPicker.launch(arrayOf("application/octet-stream", "*/*")) },
-                    enabled = !state.busy) { Text("Import GGUF model") }
+                    enabled = !state.busy) { Text("Select stateful Parakeet .tflite") }
             }
 
             SectionCard("Language") {

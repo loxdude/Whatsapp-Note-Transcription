@@ -1,2 +1,3 @@
--keep class com.local.voicenotes.inference.NativeQwenBridge { *; }
+-keep class com.qualcomm.qti.** { *; }
+-keep class org.tensorflow.lite.** { *; }
 

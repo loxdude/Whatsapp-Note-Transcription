@@ -1,3 +1,5 @@
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -9,41 +11,18 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.local.voicenotes"
-        minSdk = 28
+        // Keep the LiteRT fork installable beside the GGUF baseline.
+        applicationId = "com.local.voicenotes.litert"
+        minSdk = 31
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0-litert"
+        ndk { abiFilters += "arm64-v8a" }
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        ndk { abiFilters += "arm64-v8a" }
-        externalNativeBuild {
-            cmake {
-                cppFlags += listOf("-std=c++17", "-O3", "-fvisibility=hidden")
-                arguments += listOf(
-                    "-DANDROID_STL=c++_shared",
-                    "-DBUILD_SHARED_LIBS=OFF",
-                    "-DCRISPASR_BUILD_EXAMPLES=OFF",
-                    "-DCRISPASR_BUILD_TESTS=OFF",
-                    "-DCRISPASR_BUILD_SERVER=OFF",
-                    "-DCRISPASR_CURL=OFF",
-                    "-DCRISPASR_MEDIA_NDK=OFF",
-                    "-DGGML_OPENMP=OFF",
-                    "-DGGML_LLAMAFILE=OFF",
-                    "-DGGML_NATIVE=OFF"
-                )
-            }
-        }
     }
 
     buildFeatures { compose = true }
-
-    externalNativeBuild {
-        cmake {
-            path = file("src/main/cpp/CMakeLists.txt")
-            version = "3.22.1"
-        }
-    }
 
     packaging {
         jniLibs.useLegacyPackaging = true
@@ -61,7 +40,12 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions { jvmTarget = "17" }
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_17)
+    }
 }
 
 dependencies {
@@ -78,6 +62,8 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.datastore:datastore-preferences:1.1.1")
+    implementation("com.google.ai.edge.litert:litert:2.1.6")
+    implementation("com.qualcomm.qti:qnn-runtime:2.48.0")
     debugImplementation("androidx.compose.ui:ui-tooling")
 
     testImplementation("junit:junit:4.13.2")

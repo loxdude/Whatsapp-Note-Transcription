@@ -2,7 +2,10 @@ package com.local.voicenotes
 
 import android.app.Application
 import android.net.Uri
+import android.content.Intent
 import android.provider.OpenableColumns
+import android.os.SystemClock
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.local.voicenotes.audio.AndroidAudioDecoder
@@ -10,7 +13,7 @@ import com.local.voicenotes.domain.ImportedModel
 import com.local.voicenotes.domain.LanguageOption
 import com.local.voicenotes.domain.TranscriptionProgress
 import com.local.voicenotes.domain.TranscriptionResult
-import com.local.voicenotes.inference.QwenBackend
+import com.local.voicenotes.inference.LiteRtParakeetBackend
 import com.local.voicenotes.model.ModelRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -39,15 +42,24 @@ data class AppUiState(
 }
 
 class AppViewModel(application: Application) : AndroidViewModel(application) {
+    companion object {
+        private const val TAG = "VoiceNotesBenchmark"
+    }
+    private val preferences = application.getSharedPreferences("audio_selection", 0)
     private val repository = ModelRepository(application)
     private val decoder = AndroidAudioDecoder(application.contentResolver)
-    private val backend = QwenBackend()
+    private val backend = LiteRtParakeetBackend(application)
     private val mutableState = MutableStateFlow(AppUiState())
     val state: StateFlow<AppUiState> = mutableState.asStateFlow()
     private var activeJob: Job? = null
     private var clockJob: Job? = null
 
-    init { refreshModels() }
+    init {
+        preferences.getString("uri", null)?.let { saved ->
+            runCatching { setAudio(Uri.parse(saved), persist = false) }
+        }
+        refreshModels()
+    }
 
     fun refreshModels() = viewModelScope.launch {
         val models = repository.models()
@@ -57,8 +69,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         mutableState.value = mutableState.value.copy(models = models, selectedModelId = selected)
     }
 
-    fun setAudio(uri: Uri) {
+    fun setAudio(uri: Uri, persist: Boolean = true) {
         val resolver = getApplication<Application>().contentResolver
+        if (persist) {
+            runCatching {
+                resolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            preferences.edit().putString("uri", uri.toString()).apply()
+        }
         val name = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
             if (cursor.moveToFirst()) cursor.getString(0) else null
         } ?: uri.lastPathSegment ?: "Selected audio"
@@ -104,6 +122,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         if (!snapshot.canTranscribe) return
         activeJob = viewModelScope.launch {
             val started = System.currentTimeMillis()
+            val benchmarkStarted = SystemClock.elapsedRealtimeNanos()
             startClock(started)
             try {
                 mutableState.value = mutableState.value.copy(
@@ -111,9 +130,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 backend.validate(model).getOrThrow()
                 mutableState.value = mutableState.value.copy(progress = TranscriptionProgress.Decoding(0f))
+                val decodeStarted = SystemClock.elapsedRealtimeNanos()
                 val pcm = decoder.decode(uri) { fraction ->
                     mutableState.value = mutableState.value.copy(progress = TranscriptionProgress.Decoding(fraction))
                 }
+                val audioDecodeMillis =
+                    (SystemClock.elapsedRealtimeNanos() - decodeStarted) / 1_000_000
                 require(pcm.isNotEmpty()) { "The audio contains no decoded samples." }
                 mutableState.value = mutableState.value.copy(progress = TranscriptionProgress.LoadingModel)
                 val text = backend.transcribe(model, pcm, snapshot.language) { fraction ->
@@ -129,6 +151,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     transcript = text,
                     elapsedMillis = result.processingDurationMillis,
                     progress = TranscriptionProgress.Completed(result)
+                )
+                Log.i(
+                    TAG,
+                    "audioDecode=${audioDecodeMillis}ms total=" +
+                        "${(SystemClock.elapsedRealtimeNanos() - benchmarkStarted) / 1_000_000}ms " +
+                        "audioSamples=${pcm.size} model=${model.displayName}"
                 )
             } catch (_: CancellationException) {
                 mutableState.value = mutableState.value.copy(progress = TranscriptionProgress.Cancelled)
