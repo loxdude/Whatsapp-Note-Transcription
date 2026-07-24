@@ -11,7 +11,6 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        // Keep the LiteRT fork installable beside the GGUF baseline.
         applicationId = "com.local.voicenotes.litert"
         minSdk = 31
         targetSdk = 35

@@ -75,7 +75,6 @@ Transcriber-android-litert/
 ├── settings.gradle.kts                   # Project settings
 ├── parakeet_tdt_0.6b_v3_5s_f32_stateful_Qualcomm_SM8650.tflite  # Default model
 ├── tools/                                # Utility scripts
-└── third_party/CrispASR/                 # Third-party ASR tools
 ```
 
 ---

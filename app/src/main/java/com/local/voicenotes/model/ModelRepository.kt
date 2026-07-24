@@ -30,7 +30,7 @@ class ModelRepository(private val context: Context) {
 
     suspend fun models(): List<ImportedModel> = context.modelDataStore.data.map { prefs ->
         decodeModels(prefs[modelsKey].orEmpty())
-    }.first().filter(::isReadable).filterNot { it.architecture == "qwen3-asr-0.6b" }
+    }.first().filter(::isReadable)
 
     suspend fun selectedModelId(): String? = context.modelDataStore.data.map { it[selectedKey] }.first()
 
