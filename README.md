@@ -138,15 +138,10 @@ To use a custom model:
 
 ## 🤝 Contributing
 
-Do whatever you want, this repo is not tha serious.
+Do whatever you want, this repo is not that serious.
 
 ---
 
-## 📜 License
-
-This project is licensed under the **MIT License**. See [LICENSE](LICENSE) for details.
-
----
 
 ## 🙌 Acknowledgments
 
