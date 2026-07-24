@@ -21,6 +21,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.ViewRootForInspector
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
@@ -98,68 +100,69 @@ private fun TranscriberScreen(state: AppUiState, viewModel: AppViewModel) {
     }
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(
-            modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(top = 50.dp, start = 20.dp, end = 20.dp, bottom = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Text("Voice notes · LiteRT", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-            Text("Parakeet TDT v3 on the Snapdragon NPU.", color = Color(0xFF60665E))
+            Text("Voice notes", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
 
-            SectionCard("Audio") {
-                OutlinedButton(
-                    onClick = { audioPicker.launch(arrayOf("audio/*", "application/ogg")) },
-                    enabled = !state.busy,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(if (state.audioName.isBlank()) "Choose a voice note" else state.audioName,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
-                Text("WhatsApp OGG/Opus, MP3, M4A, AAC or WAV · up to 15 minutes",
-                    style = MaterialTheme.typography.bodySmall, color = Color(0xFF6B7168))
-            }
+            SectionCard("Settings") {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("Audio (MP3, Opus, M4A, AAC, WAV)", fontWeight = FontWeight.SemiBold)
+                    OutlinedButton(
+                        onClick = { audioPicker.launch(arrayOf("audio/*", "application/octet-stream")) },
+                        enabled = !state.busy,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(if (state.audioName.isBlank()) "Choose a voice note" else state.audioName,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
 
-            SectionCard("Model") {
-                var expanded by remember { mutableStateOf(false) }
-                ExposedDropdownMenuBox(expanded, { expanded = !expanded && !state.busy }) {
-                    OutlinedTextField(
-                        value = state.selectedModel?.displayName ?: "No compatible model imported",
-                        onValueChange = {}, readOnly = true,
-                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },
-                        modifier = Modifier.menuAnchor().fillMaxWidth(),
-                        label = { Text("LiteRT model") }
-                    )
-                    DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                        state.models.forEach { model ->
-                            DropdownMenuItem(
-                                text = {
-                                    Column {
-                                        Text(model.displayName)
-                                        Text(model.note, style = MaterialTheme.typography.bodySmall,
-                                            color = if (model.enabled) Color(0xFF49664B) else Color(0xFF9A4545))
-                                    }
-                                },
-                                enabled = model.enabled,
-                                onClick = { viewModel.selectModel(model.id); expanded = false }
-                            )
+                    Text("Model", fontWeight = FontWeight.SemiBold)
+                    var modelExpanded by remember { mutableStateOf(false) }
+                    ExposedDropdownMenuBox(modelExpanded, { modelExpanded = !modelExpanded && !state.busy }) {
+                        OutlinedTextField(
+                            value = state.selectedModel?.displayName ?: "No model imported",
+                            onValueChange = {}, readOnly = true,
+                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(modelExpanded) },
+                            modifier = Modifier.menuAnchor().fillMaxWidth(),
+                            label = { Text("LiteRT model") }
+                        )
+                        DropdownMenu(expanded = modelExpanded, onDismissRequest = { modelExpanded = false }) {
+                            state.models.forEach { model ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Column {
+                                            Text(model.displayName)
+                                            Text(model.note, style = MaterialTheme.typography.bodySmall,
+                                                color = if (model.enabled) Color(0xFF49664B) else Color(0xFF9A4545))
+                                        }
+                                    },
+                                    enabled = model.enabled,
+                                    onClick = { viewModel.selectModel(model.id); modelExpanded = false }
+                                )
+                            }
                         }
                     }
-                }
-                TextButton(onClick = { modelPicker.launch(arrayOf("application/octet-stream", "*/*")) },
-                    enabled = !state.busy) { Text("Select stateful Parakeet .tflite") }
-            }
+                    TextButton(onClick = { modelPicker.launch(arrayOf("application/octet-stream", "*/*")) },
+                        enabled = !state.busy) { Text("Import .tflite") }
 
-            SectionCard("Language") {
-                var expanded by remember { mutableStateOf(false) }
-                ExposedDropdownMenuBox(expanded, { expanded = !expanded && !state.busy }) {
-                    OutlinedTextField(
-                        value = state.language.label, onValueChange = {}, readOnly = true,
-                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },
-                        modifier = Modifier.menuAnchor().fillMaxWidth()
-                    )
-                    DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                        LanguageOption.entries.forEach { language ->
-                            DropdownMenuItem(text = { Text(language.label) }, onClick = {
-                                viewModel.setLanguage(language); expanded = false
-                            })
+                    Text("Language", fontWeight = FontWeight.SemiBold)
+                    var langExpanded by remember { mutableStateOf(false) }
+                    ExposedDropdownMenuBox(langExpanded, { langExpanded = !langExpanded && !state.busy }) {
+                        OutlinedTextField(
+                            value = state.language.label, onValueChange = {}, readOnly = true,
+                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(langExpanded) },
+                            modifier = Modifier.menuAnchor().fillMaxWidth()
+                        )
+                        DropdownMenu(expanded = langExpanded, onDismissRequest = { langExpanded = false }) {
+                            LanguageOption.entries.forEach { language ->
+                                DropdownMenuItem(text = { Text(language.label) }, onClick = {
+                                    viewModel.setLanguage(language); langExpanded = false
+                                })
+                            }
                         }
                     }
                 }
@@ -170,20 +173,19 @@ private fun TranscriberScreen(state: AppUiState, viewModel: AppViewModel) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Button(
                     onClick = viewModel::transcribe, enabled = state.canTranscribe,
-                    modifier = Modifier.weight(1f).height(52.dp),
+                    modifier = Modifier.weight(1f).height(48.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
                 ) { Text("Transcribe") }
-                if (state.busy) OutlinedButton(onClick = viewModel::cancel, modifier = Modifier.height(52.dp)) {
+                if (state.busy) OutlinedButton(onClick = viewModel::cancel, modifier = Modifier.height(48.dp)) {
                     Text("Cancel")
                 }
             }
 
             OutlinedTextField(
                 value = state.transcript, onValueChange = viewModel::editTranscript,
-                modifier = Modifier.fillMaxWidth().height(240.dp),
+                modifier = Modifier.fillMaxWidth().weight(1f),
                 label = { Text("Transcript") }, placeholder = { Text("The transcript will appear here.") }
             )
-            Spacer(Modifier.height(20.dp))
         }
     }
 }
@@ -191,8 +193,8 @@ private fun TranscriberScreen(state: AppUiState, viewModel: AppViewModel) {
 @Composable
 private fun SectionCard(title: String, content: @Composable ColumnScope.() -> Unit) {
     Column(
-        modifier = Modifier.fillMaxWidth().background(Color.White, RoundedCornerShape(16.dp)).padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
+        modifier = Modifier.fillMaxWidth().background(Color.White, RoundedCornerShape(12.dp)).padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         Text(title, fontWeight = FontWeight.SemiBold)
         content()
