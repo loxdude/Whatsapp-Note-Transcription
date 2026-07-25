@@ -144,7 +144,16 @@ Do whatever you want, this repo is not that serious.
 
 ## 🙌 Acknowledgments
 
-- **LiteRT**: Google’s runtime for on-device ML.
-- **QNN Runtime**: Qualcomm’s Neural Network runtime for Snapdragon NPUs.
+- **LiteRT**: Google's runtime for on-device ML.
+- **QNN Runtime**: Qualcomm's Neural Network runtime for Snapdragon NPUs.
 - **Parakeet TDT v3**: Open-source speech recognition model.
 - **Jetpack Compose**: Modern Android UI toolkit.
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+### Third-Party Licenses
+- **Qualcomm QNN Runtime**: MIT License (Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.)
+- **LiteRT**: Apache License 2.0
+- **Parakeet TDT Model**: Apache License 2.0
