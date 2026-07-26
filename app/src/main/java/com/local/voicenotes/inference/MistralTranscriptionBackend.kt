@@ -55,20 +55,125 @@ class MistralTranscriptionBackend(private val context: Context) : TranscriptionB
         language: LanguageOption,
         onProgress: (Float) -> Unit
     ): String = withContext(Dispatchers.IO) {
+        // Fallback to PCM-based transcription
+        transcribeWithPcm(model, pcm16KhzMono, language, onProgress)
+    }
+
+    suspend fun transcribeWithUri(
+        model: ImportedModel,
+        uri: Uri,
+        language: LanguageOption,
+        onProgress: (Float) -> Unit
+    ): String = withContext(Dispatchers.IO) {
+        cancelled = false
+        onProgress(0f)
+
+        try {
+            Log.i(TAG, "Starting Mistral transcription with URI: $uri")
+
+            // Get API key from preferences or environment
+            val apiKey = getApiKey() ?: throw IllegalStateException("Mistral API key not configured")
+            Log.i(TAG, "API key found, length: ${apiKey.length}")
+
+            // Open the file from the URI
+            val resolver = context.contentResolver
+            val inputStream = resolver.openInputStream(uri)
+                ?: throw IllegalStateException("Failed to open file from URI")
+
+            // Read the file into a temporary file (to get its size and name)
+            val tempFile = File.createTempFile("audio", ".mp3", context.cacheDir)
+            tempFile.deleteOnExit()
+            inputStream.use { input ->
+                FileOutputStream(tempFile).use { output ->
+                    input.copyTo(output)
+                }
+            }
+            Log.i(TAG, "Copied file to temp: ${tempFile.absolutePath}, size: ${tempFile.length()}")
+
+            onProgress(0.3f)
+
+            // Build request with the original file
+            val requestBody = MultipartBody.Builder()
+                .setType(MultipartBody.FORM)
+                .addFormDataPart(
+                    "file",
+                    "audio.mp3",
+                    tempFile.asRequestBody("audio/mpeg".toMediaType())
+                )
+                .addFormDataPart("model", model.architecture)
+                .apply {
+                    if (language != LanguageOption.AUTO) {
+                        addFormDataPart("language", language.code)
+                    }
+                }
+                .build()
+
+            val request = Request.Builder()
+                .url(API_URL)
+                .header("Authorization", "Bearer $apiKey")
+                .post(requestBody)
+                .build()
+
+            onProgress(0.5f)
+
+            // Execute request
+            Log.i(TAG, "Executing API request to $API_URL")
+            try {
+                client.newCall(request).execute().use { response ->
+                    Log.i(TAG, "API response code: ${response.code}, message: ${response.message}")
+                    if (!response.isSuccessful) {
+                        val errorBody = response.body?.string() ?: "No error body"
+                        Log.e(TAG, "API request failed: ${response.code} - ${response.message}, body: $errorBody")
+                        throw Exception("API request failed: ${response.code} - ${response.message} - $errorBody")
+                    }
+
+                    val responseBody = response.body?.string()
+                        ?: throw Exception("Empty response from API")
+                    Log.i(TAG, "API response body: $responseBody")
+
+                    val result = parseMistralResponse(responseBody)
+                    onProgress(1f)
+                    result
+                }
+            } catch (e: java.net.SocketTimeoutException) {
+                Log.e(TAG, "Network timeout: ${e.message}")
+                throw Exception("Network timeout - unable to connect to Mistral API. Please check your internet connection.")
+            } catch (e: java.net.UnknownHostException) {
+                Log.e(TAG, "DNS resolution failed: ${e.message}")
+                throw Exception("DNS resolution failed - unable to connect to Mistral API. Please check your internet connection.")
+            } catch (e: java.net.ConnectException) {
+                Log.e(TAG, "Connection failed: ${e.message}")
+                throw Exception("Connection failed - unable to connect to Mistral API. Please check your internet connection and API key.")
+            }
+        } catch (e: Exception) {
+            if (cancelled) {
+                throw CancellationException("Transcription cancelled")
+            }
+            Log.e(TAG, "Transcription failed", e)
+            throw e
+        }
+    }
+
+    private suspend fun transcribeWithPcm(
+        model: ImportedModel,
+        pcm16KhzMono: FloatArray,
+        language: LanguageOption,
+        onProgress: (Float) -> Unit
+    ): String = withContext(Dispatchers.IO) {
         cancelled = false
         onProgress(0f)
 
         try {
             Log.i(TAG, "Starting Mistral transcription with ${pcm16KhzMono.size} samples")
-            
+
             // Convert FloatArray to ByteArray (PCM16)
             val pcmBytes = FloatArrayToByteArray(pcm16KhzMono)
             Log.i(TAG, "Converted to ${pcmBytes.size} bytes of PCM data")
-            
-            // Create temporary file for audio
+
+            // Create temporary file for audio (WAV format)
             val tempFile = File.createTempFile("audio", ".wav", context.cacheDir)
             tempFile.deleteOnExit()
-            
+
             // Write WAV header and PCM data
             FileOutputStream(tempFile).use { output ->
                 writeWavHeader(output, pcmBytes.size)
@@ -121,12 +226,9 @@ class MistralTranscriptionBackend(private val context: Context) : TranscriptionB
                         ?: throw Exception("Empty response from API")
                     Log.i(TAG, "API response body: $responseBody")
 
-                    val json = JSONObject(responseBody)
-                    val text = json.getString("text")
-                    Log.i(TAG, "Extracted text: $text")
-
+                    val result = parseMistralResponse(responseBody)
                     onProgress(1f)
-                    text
+                    result
                 }
             } catch (e: java.net.SocketTimeoutException) {
                 Log.e(TAG, "Network timeout: ${e.message}")
@@ -144,8 +246,8 @@ class MistralTranscriptionBackend(private val context: Context) : TranscriptionB
             }
             Log.e(TAG, "Transcription failed", e)
             throw e
-        }
-    }
+         }
+     }
 
     override fun cancel() {
         cancelled = true
@@ -236,7 +338,32 @@ class MistralTranscriptionBackend(private val context: Context) : TranscriptionB
         output.write(header)
     }
 
-    private fun getApiKey(): String? {
+@Throws(Exception::class)
+    private fun parseMistralResponse(responseBody: String): String {
+         val json = JSONObject(responseBody)
+         Log.i(TAG, "Full API response: $json")
+         
+         val text = json.optString("text", "")
+         val errorMsg = json.optString("error", null)
+         val segments = json.optJSONArray("segments")
+         
+         Log.i(TAG, "Extracted text: '$text'")
+         Log.i(TAG, "Error field: $errorMsg")
+         Log.i(TAG, "Segments: $segments")
+
+         if (text.isEmpty()) {
+             val message = if (segments != null && segments.length() == 0) {
+                 "No speech detected in audio. Please check if the audio contains clear speech."
+             } else {
+                 errorMsg ?: "Empty result"
+             }
+             Log.e(TAG, "Empty transcription result: $message")
+             throw Exception("Transcription failed: $message")
+         }
+         return text
+     }
+
+     private fun getApiKey(): String? {
         // Try to get from environment first
         System.getenv("MISTRAL_API_KEY")?.let { return it }
         

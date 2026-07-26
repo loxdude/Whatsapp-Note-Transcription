@@ -151,10 +151,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 val audioDecodeMillis =
                     (SystemClock.elapsedRealtimeNanos() - decodeStarted) / 1_000_000
                 require(pcm.isNotEmpty()) { "The audio contains no decoded samples." }
-                mutableState.value = mutableState.value.copy(progress = TranscriptionProgress.LoadingModel)
-                val text = backend.transcribe(model, pcm, snapshot.language) { fraction ->
-                    mutableState.value = mutableState.value.copy(progress = TranscriptionProgress.Transcribing(fraction))
-                }.trim()
+                 mutableState.value = mutableState.value.copy(progress = TranscriptionProgress.LoadingModel)
+                 val text = if (model.backend == "mistral-api") {
+                     (backend as MistralTranscriptionBackend).transcribeWithUri(model, uri, snapshot.language) { fraction ->
+                         mutableState.value = mutableState.value.copy(progress = TranscriptionProgress.Transcribing(fraction))
+                     }.trim()
+                 } else {
+                     backend.transcribe(model, pcm, snapshot.language) { fraction ->
+                         mutableState.value = mutableState.value.copy(progress = TranscriptionProgress.Transcribing(fraction))
+                     }.trim()
+                 }
                 val result = TranscriptionResult(
                     detectedLanguage = snapshot.language.code,
                     text = text,
