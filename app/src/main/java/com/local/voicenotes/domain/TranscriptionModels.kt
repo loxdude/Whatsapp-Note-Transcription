@@ -26,7 +26,9 @@ data class ImportedModel(
     val architecture: String,
     val backend: String,
     val enabled: Boolean,
-    val note: String = ""
+    val note: String = "",
+    val isApiModel: Boolean = false,
+    val apiKeyRequired: Boolean = false
 )
 
 data class TranscriptionRequest(

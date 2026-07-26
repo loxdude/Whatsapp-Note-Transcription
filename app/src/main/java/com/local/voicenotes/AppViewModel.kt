@@ -1,6 +1,7 @@
 package com.local.voicenotes
 
 import android.app.Application
+import android.content.Context
 import android.net.Uri
 import android.content.Intent
 import android.provider.OpenableColumns
@@ -14,6 +15,8 @@ import com.local.voicenotes.domain.LanguageOption
 import com.local.voicenotes.domain.TranscriptionProgress
 import com.local.voicenotes.domain.TranscriptionResult
 import com.local.voicenotes.inference.LiteRtParakeetBackend
+import com.local.voicenotes.inference.MistralTranscriptionBackend
+import com.local.voicenotes.inference.TranscriptionBackend
 import com.local.voicenotes.model.ModelRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -48,8 +51,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val preferences = application.getSharedPreferences("audio_selection", 0)
     private val repository = ModelRepository(application)
     private val decoder = AndroidAudioDecoder(application.contentResolver)
-    private val backend = LiteRtParakeetBackend(application)
+    private val liteRtBackend = LiteRtParakeetBackend(application)
+    private val mistralBackend = MistralTranscriptionBackend(application)
     private val mutableState = MutableStateFlow(AppUiState())
+    private val backends: Map<String, TranscriptionBackend> = mapOf(
+        "litert-qnn" to liteRtBackend,
+        "litert-qnn-sm8650" to liteRtBackend,
+        "mistral-api" to mistralBackend
+    )
     val state: StateFlow<AppUiState> = mutableState.asStateFlow()
     private var activeJob: Job? = null
     private var clockJob: Job? = null
@@ -132,6 +141,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 mutableState.value = mutableState.value.copy(
                     progress = TranscriptionProgress.Preparing, transcript = "", elapsedMillis = 0
                 )
+                val backend = backends[model.backend] ?: throw IllegalStateException("No backend available for this model type.")
                 backend.validate(model).getOrThrow()
                 mutableState.value = mutableState.value.copy(progress = TranscriptionProgress.Decoding(0f))
                 val decodeStarted = SystemClock.elapsedRealtimeNanos()
@@ -175,13 +185,24 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun cancel() {
-        backend.cancel()
+        liteRtBackend.cancel()
+        mistralBackend.cancel()
         activeJob?.cancel()
         mutableState.value = mutableState.value.copy(progress = TranscriptionProgress.Cancelled)
     }
 
     fun editTranscript(value: String) {
         mutableState.value = mutableState.value.copy(transcript = value)
+    }
+
+    fun setApiKey(apiKey: String) {
+        val prefs = getApplication<Application>().getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
+        prefs.edit().putString("mistral_api_key", apiKey).apply()
+    }
+
+    fun getApiKey(): String? {
+        val prefs = getApplication<Application>().getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
+        return prefs.getString("mistral_api_key", null)
     }
 
     private fun startClock(started: Long) {
@@ -199,6 +220,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         prepareJob = viewModelScope.launch {
             if (mutableState.value.selectedModelId != model.id) return@launch
             mutableState.value = mutableState.value.copy(progress = TranscriptionProgress.LoadingModel)
+            val backend = backends[model.backend] ?: run {
+                mutableState.value = mutableState.value.copy(
+                    progress = TranscriptionProgress.Failed("No backend available for this model type.")
+                )
+                return@launch
+            }
             backend.prepare(model).fold(
                 onSuccess = {
                     if (mutableState.value.selectedModelId == model.id) {
@@ -217,8 +244,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
-        backend.cancel()
-        backend.close()
+        liteRtBackend.cancel()
+        liteRtBackend.close()
+        mistralBackend.cancel()
+        mistralBackend.close()
         super.onCleared()
     }
 }

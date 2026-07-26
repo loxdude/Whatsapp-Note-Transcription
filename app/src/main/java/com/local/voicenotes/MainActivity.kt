@@ -53,6 +53,10 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.local.voicenotes.domain.LanguageOption
 import com.local.voicenotes.domain.TranscriptionProgress
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import java.util.Locale
 
 class MainActivity : ComponentActivity() {
@@ -98,6 +102,7 @@ private fun TranscriberScreen(state: AppUiState, viewModel: AppViewModel) {
     val modelPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(viewModel::importModel)
     }
+    var showApiKeyDialog by remember { mutableStateOf(false) }
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(
             modifier = Modifier
@@ -106,7 +111,16 @@ private fun TranscriberScreen(state: AppUiState, viewModel: AppViewModel) {
                 .padding(top = 50.dp, start = 20.dp, end = 20.dp, bottom = 20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Text("Voice notes", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Voice notes", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                IconButton(onClick = { showApiKeyDialog = true }) {
+                    Icon(Icons.Default.Settings, contentDescription = "Settings")
+                }
+            }
 
             SectionCard("Settings") {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -188,6 +202,53 @@ private fun TranscriberScreen(state: AppUiState, viewModel: AppViewModel) {
             )
         }
     }
+
+    if (showApiKeyDialog) {
+        ApiKeyDialog(
+            currentApiKey = viewModel.getApiKey(),
+            onSave = { apiKey ->
+                viewModel.setApiKey(apiKey)
+                showApiKeyDialog = false
+            },
+            onDismiss = { showApiKeyDialog = false }
+        )
+    }
+}
+
+@Composable
+private fun ApiKeyDialog(
+    currentApiKey: String?,
+    onSave: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var apiKey by remember { mutableStateOf(currentApiKey ?: "") }
+    
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Mistral API Key") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Enter your Mistral API key to use the Mistral Transcription API.")
+                OutlinedTextField(
+                    value = apiKey,
+                    onValueChange = { apiKey = it },
+                    label = { Text("API Key") },
+                    placeholder = { Text("sk-...") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            Button(onClick = { onSave(apiKey) }) {
+                Text("Save")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
 }
 
 @Composable

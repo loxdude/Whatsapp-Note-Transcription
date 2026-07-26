@@ -63,6 +63,7 @@ dependencies {
     implementation("androidx.datastore:datastore-preferences:1.1.1")
     implementation("com.google.ai.edge.litert:litert:2.1.6")
     implementation("com.qualcomm.qti:qnn-runtime:2.48.0")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
     debugImplementation("androidx.compose.ui:ui-tooling")
 
     testImplementation("junit:junit:4.13.2")
