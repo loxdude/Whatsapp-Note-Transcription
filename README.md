@@ -6,11 +6,14 @@ A high-performance **offline** Android app for transcribing voice notes using **
 
 ## ✨ Features
 
+- **Dual Transcription Backends**: Choose between offline **LiteRT/Parakeet** or online **Mistral API** transcription.
+- **Mistral Voxtral Mini (API)**: Cloud-based transcription via the [Mistral AI API](https://mistral.ai) using the **voxtral-mini-latest** model. Requires an API key and internet connection.
 - **Offline Transcription**: No internet required, fully local processing.
 - **NPU Acceleration**: Leverages **Qualcomm’s QNN runtime** via **LiteRT** for low-latency inference.
 - **Multi-Format Support**: Works with **WhatsApp Opus, MP3, M4A, AAC, WAV** (up to 15 minutes).
 - **Multi-Language**: Auto-detect or manually select from **13 languages** (German, English, Spanish, French, Italian, Portuguese, Dutch, Polish, Turkish, Japanese, Korean, Chinese).
 - **Model Management**: Import custom **TFLite models** (e.g., `parakeet_tdt_0.6b_v3_5s_f32_stateful_Qualcomm_SM8650.tflite`).
+- **Secure API Key Storage**: Mistral API key is encrypted with an **Android Keystore**-backed AES-GCM key.
 - **Benchmarking**: Logs audio decode time, inference latency, and total processing time.
 - **Modern UI**: Built with **Jetpack Compose** and **Material 3**.
 
@@ -40,7 +43,17 @@ parakeet_tdt_0.6b_v3_5s_f32_stateful_Qualcomm_SM8650.tflite
 ```
 *Download the model from [Huggingface](https://huggingface.co/litert-community/parakeet-tdt-0.6b-v3/tree/main)*
 
-### 3. Build the App
+### 3. (Optional) Add a Mistral API Key
+
+To use the **Mistral Voxtral Mini** transcription backend:
+
+1. Get an API key from [console.mistral.ai](https://console.mistral.ai).
+2. Open the app, tap the **⚙ Settings** icon, and enter your key.
+3. The key is stored encrypted on-device via **Android Keystore** (AES-GCM).
+
+*Note: Mistral transcription requires an internet connection. Local transcription works fully offline.*
+
+### 4. Build the App
 ```bash
 ./gradlew assembleDebug
 ```
@@ -108,10 +121,20 @@ Transcriber-android-litert/
 
 1. **Open the App**: Launch the app on a supported Android device.
 2. **Select Audio File**: Choose a voice note (OGG/Opus, MP3, M4A, AAC, or WAV).
-3. **Select Model**: Use the default model or import a custom TFLite model.
+3. **Select Model**: Use the default Parakeet model for offline transcription, or select **Mistral Voxtral Mini (API)** for cloud-based transcription (requires API key).
 4. **Select Language**: Auto-detect or manually select a language.
 5. **Start Transcription**: Tap "Transcribe" to process the audio.
 6. **View Results**: The transcribed text will appear in the UI.
+
+### Mistral API Transcription
+
+1. Obtain an API key from [console.mistral.ai](https://console.mistral.ai).
+2. Open the app → tap the **⚙ Settings** icon → enter your Mistral API key.
+3. In the model dropdown, select **Mistral Voxtral Mini (API)**.
+4. Select your audio file and language, then tap **Transcribe**.
+5. The app sends the original audio file (e.g., MP3, Opus) directly to the Mistral API — no local audio decoding needed.
+
+*The Mistral API key is encrypted with AES-GCM via the Android Keystore. The app also supports a `MISTRAL_API_KEY` environment variable as a fallback.*
 
 ---
 

@@ -29,8 +29,22 @@ class ModelRepository(private val context: Context) {
     private val selectedKey = stringPreferencesKey("selected_model")
 
     suspend fun models(): List<ImportedModel> = context.modelDataStore.data.map { prefs ->
-        decodeModels(prefs[modelsKey].orEmpty())
-    }.first().filter(::isReadable)
+        val importedModels = decodeModels(prefs[modelsKey].orEmpty()).filter(::isReadable)
+        // Add built-in Mistral API model
+        val mistralModel = ImportedModel(
+            id = "mistral-api",
+            displayName = "Mistral Voxtral Mini (API)",
+            path = "",
+            sizeBytes = 0L,
+            architecture = "voxtral-mini-latest",
+            backend = "mistral-api",
+            enabled = true,
+            note = "Uses Mistral API - requires API key",
+            isApiModel = true,
+            apiKeyRequired = true
+        )
+        (listOf(mistralModel) + importedModels).distinctBy { it.id }
+    }.first()
 
     suspend fun selectedModelId(): String? = context.modelDataStore.data.map { it[selectedKey] }.first()
 

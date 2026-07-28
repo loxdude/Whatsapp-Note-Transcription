@@ -8,7 +8,14 @@ import androidx.activity.compose.LocalActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -46,13 +53,22 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.local.voicenotes.domain.LanguageOption
 import com.local.voicenotes.domain.TranscriptionProgress
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import java.util.Locale
 
 class MainActivity : ComponentActivity() {
@@ -98,6 +114,7 @@ private fun TranscriberScreen(state: AppUiState, viewModel: AppViewModel) {
     val modelPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(viewModel::importModel)
     }
+    var showApiKeyDialog by remember { mutableStateOf(false) }
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(
             modifier = Modifier
@@ -106,7 +123,16 @@ private fun TranscriberScreen(state: AppUiState, viewModel: AppViewModel) {
                 .padding(top = 50.dp, start = 20.dp, end = 20.dp, bottom = 20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Text("Voice notes", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Voice notes", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                IconButton(onClick = { showApiKeyDialog = true }) {
+                    Icon(Icons.Default.Settings, contentDescription = "Settings")
+                }
+            }
 
             SectionCard("Settings") {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -188,6 +214,54 @@ private fun TranscriberScreen(state: AppUiState, viewModel: AppViewModel) {
             )
         }
     }
+
+    if (showApiKeyDialog) {
+        ApiKeyDialog(
+            currentApiKey = viewModel.getApiKey(),
+            onSave = { apiKey ->
+                viewModel.setApiKey(apiKey)
+                showApiKeyDialog = false
+            },
+            onDismiss = { showApiKeyDialog = false }
+        )
+    }
+}
+
+@Composable
+private fun ApiKeyDialog(
+    currentApiKey: String?,
+    onSave: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var apiKey by remember { mutableStateOf(currentApiKey ?: "") }
+    
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Mistral API Key") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Enter your Mistral API key to use the Mistral Transcription API.")
+                OutlinedTextField(
+                    value = apiKey,
+                    onValueChange = { apiKey = it },
+                    label = { Text("API Key") },
+                    placeholder = { Text("sk-...") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            Button(onClick = { onSave(apiKey) }) {
+                Text("Save")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
 }
 
 @Composable
@@ -220,8 +294,51 @@ private fun ProgressArea(state: AppUiState) {
             if (state.busy || state.elapsedMillis > 0) Text(formatElapsed(state.elapsedMillis), color = Color(0xFF535950))
         }
         if (state.busy || fraction != null) {
-            if (fraction == null || fraction <= 0f) LinearProgressIndicator(Modifier.fillMaxWidth())
-            else LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
+            if (state.progress is TranscriptionProgress.Transcribing &&
+                state.selectedModel?.backend == "mistral-api") {
+                MistralProgressIndicator(Modifier.fillMaxWidth())
+            } else if (fraction == null || fraction <= 0f) {
+                LinearProgressIndicator(Modifier.fillMaxWidth())
+            } else {
+                LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
+            }
+        }
+    }
+}
+
+@Composable
+private fun MistralProgressIndicator(modifier: Modifier = Modifier) {
+    val transition = rememberInfiniteTransition(label = "mistralProgress")
+    val phase by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(900, easing = LinearEasing)),
+        label = "stripePhase"
+    )
+    Box(
+        modifier = modifier
+            .height(4.dp)
+            .clip(RoundedCornerShape(2.dp))
+            .background(Color(0xFFB8BBB6))
+            .padding(0.5.dp)
+    ) {
+        Canvas(modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(2.dp))) {
+            val stripeWidth = size.height * 2.4f
+            val offset = phase * stripeWidth * 2f
+            drawRect(
+                brush = Brush.linearGradient(
+                    colors = listOf(
+                        Color(0xFF49664B),
+                        Color(0xFF49664B),
+                        Color.White.copy(alpha = 0.18f),
+                        Color.White.copy(alpha = 0.18f),
+                        Color(0xFF49664B)
+                    ),
+                    start = Offset(-stripeWidth + offset, 0f),
+                    end = Offset(stripeWidth + offset, size.height),
+                    tileMode = TileMode.Repeated
+                )
+            )
         }
     }
 }
