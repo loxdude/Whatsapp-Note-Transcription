@@ -8,7 +8,14 @@ import androidx.activity.compose.LocalActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -46,9 +53,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.local.voicenotes.domain.LanguageOption
@@ -234,6 +246,7 @@ private fun ApiKeyDialog(
                     onValueChange = { apiKey = it },
                     label = { Text("API Key") },
                     placeholder = { Text("sk-...") },
+                    visualTransformation = PasswordVisualTransformation(),
                     modifier = Modifier.fillMaxWidth()
                 )
             }
@@ -281,8 +294,51 @@ private fun ProgressArea(state: AppUiState) {
             if (state.busy || state.elapsedMillis > 0) Text(formatElapsed(state.elapsedMillis), color = Color(0xFF535950))
         }
         if (state.busy || fraction != null) {
-            if (fraction == null || fraction <= 0f) LinearProgressIndicator(Modifier.fillMaxWidth())
-            else LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
+            if (state.progress is TranscriptionProgress.Transcribing &&
+                state.selectedModel?.backend == "mistral-api") {
+                MistralProgressIndicator(Modifier.fillMaxWidth())
+            } else if (fraction == null || fraction <= 0f) {
+                LinearProgressIndicator(Modifier.fillMaxWidth())
+            } else {
+                LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
+            }
+        }
+    }
+}
+
+@Composable
+private fun MistralProgressIndicator(modifier: Modifier = Modifier) {
+    val transition = rememberInfiniteTransition(label = "mistralProgress")
+    val phase by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(900, easing = LinearEasing)),
+        label = "stripePhase"
+    )
+    Box(
+        modifier = modifier
+            .height(4.dp)
+            .clip(RoundedCornerShape(2.dp))
+            .background(Color(0xFFB8BBB6))
+            .padding(0.5.dp)
+    ) {
+        Canvas(modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(2.dp))) {
+            val stripeWidth = size.height * 2.4f
+            val offset = phase * stripeWidth * 2f
+            drawRect(
+                brush = Brush.linearGradient(
+                    colors = listOf(
+                        Color(0xFF49664B),
+                        Color(0xFF49664B),
+                        Color.White.copy(alpha = 0.18f),
+                        Color.White.copy(alpha = 0.18f),
+                        Color(0xFF49664B)
+                    ),
+                    start = Offset(-stripeWidth + offset, 0f),
+                    end = Offset(stripeWidth + offset, size.height),
+                    tileMode = TileMode.Repeated
+                )
+            )
         }
     }
 }

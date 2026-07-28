@@ -2,12 +2,14 @@ package com.local.voicenotes.inference
 
 import android.content.Context
 import android.net.Uri
+import android.provider.OpenableColumns
 import android.util.Log
 import com.local.voicenotes.domain.ImportedModel
 import com.local.voicenotes.domain.LanguageOption
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
-import kotlin.coroutines.cancellation.CancellationException
+import okhttp3.Call
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
@@ -16,9 +18,12 @@ import okhttp3.RequestBody.Companion.asRequestBody
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
+import java.net.URLConnection
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.cancellation.CancellationException
+import kotlin.coroutines.coroutineContext
 
-class MistralTranscriptionBackend(private val context: Context) : TranscriptionBackend {
+class MistralTranscriptionBackend(private val context: Context) : UriTranscriptionBackend {
     companion object {
         private const val TAG = "MistralTranscription"
         private const val API_URL = "https://api.mistral.ai/v1/audio/transcriptions"
@@ -32,15 +37,14 @@ class MistralTranscriptionBackend(private val context: Context) : TranscriptionB
             .writeTimeout(TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .build()
     }
+    private val apiKeyStore = MistralApiKeyStore(context)
 
     @Volatile
-    private var cancelled = false
+    private var activeCall: Call? = null
 
     override suspend fun validate(model: ImportedModel): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
-            require(model.backend == "mistral-api") {
-                "This is not a Mistral API model."
-            }
+            require(model.backend == "mistral-api") { "This is not a Mistral API model." }
             require(model.architecture == "voxtral-mini-latest") {
                 "Mistral API only supports voxtral-mini-latest model."
             }
@@ -49,326 +53,221 @@ class MistralTranscriptionBackend(private val context: Context) : TranscriptionB
 
     override suspend fun prepare(model: ImportedModel): Result<Unit> = validate(model)
 
+    /**
+     * Compatibility path for callers that only have locally decoded PCM. The main app uses
+     * [transcribeUri] so it can upload the original source file without decoding it first.
+     */
     override suspend fun transcribe(
         model: ImportedModel,
         pcm16KhzMono: FloatArray,
         language: LanguageOption,
         onProgress: (Float) -> Unit
     ): String = withContext(Dispatchers.IO) {
-        // Fallback to PCM-based transcription
-        transcribeWithPcm(model, pcm16KhzMono, language, onProgress)
+        val pcmBytes = floatArrayToLittleEndianPcm16(pcm16KhzMono)
+        val tempFile = File.createTempFile("mistral-", ".wav", context.cacheDir)
+        try {
+            FileOutputStream(tempFile).use { output ->
+                writeWavHeader(output, pcmBytes.size)
+                output.write(pcmBytes)
+            }
+            transcribeFile(model, tempFile, "audio.wav", "audio/wav", language, onProgress)
+        } finally {
+            tempFile.delete()
+        }
     }
 
-    suspend fun transcribeWithUri(
+    override suspend fun transcribeUri(
         model: ImportedModel,
         uri: Uri,
         language: LanguageOption,
         onProgress: (Float) -> Unit
     ): String = withContext(Dispatchers.IO) {
-        cancelled = false
-        onProgress(0f)
-
+        val source = stageSourceFile(uri)
         try {
-            Log.i(TAG, "Starting Mistral transcription with URI: $uri")
-
-            // Get API key from preferences or environment
-            val apiKey = getApiKey() ?: throw IllegalStateException("Mistral API key not configured")
-            Log.i(TAG, "API key found, length: ${apiKey.length}")
-
-            // Open the file from the URI
-            val resolver = context.contentResolver
-            val inputStream = resolver.openInputStream(uri)
-                ?: throw IllegalStateException("Failed to open file from URI")
-
-            // Read the file into a temporary file (to get its size and name)
-            val tempFile = File.createTempFile("audio", ".mp3", context.cacheDir)
-            tempFile.deleteOnExit()
-            inputStream.use { input ->
-                FileOutputStream(tempFile).use { output ->
-                    input.copyTo(output)
-                }
-            }
-            Log.i(TAG, "Copied file to temp: ${tempFile.absolutePath}, size: ${tempFile.length()}")
-
-            onProgress(0.3f)
-
-            // Build request with the original file
-            val requestBody = MultipartBody.Builder()
-                .setType(MultipartBody.FORM)
-                .addFormDataPart(
-                    "file",
-                    "audio.mp3",
-                    tempFile.asRequestBody("audio/mpeg".toMediaType())
-                )
-                .addFormDataPart("model", model.architecture)
-                .apply {
-                    if (language != LanguageOption.AUTO) {
-                        addFormDataPart("language", language.code)
-                    }
-                }
-                .build()
-
-            val request = Request.Builder()
-                .url(API_URL)
-                .header("Authorization", "Bearer $apiKey")
-                .post(requestBody)
-                .build()
-
-            onProgress(0.5f)
-
-            // Execute request
-            Log.i(TAG, "Executing API request to $API_URL")
-            try {
-                client.newCall(request).execute().use { response ->
-                    Log.i(TAG, "API response code: ${response.code}, message: ${response.message}")
-                    if (!response.isSuccessful) {
-                        val errorBody = response.body?.string() ?: "No error body"
-                        Log.e(TAG, "API request failed: ${response.code} - ${response.message}, body: $errorBody")
-                        throw Exception("API request failed: ${response.code} - ${response.message} - $errorBody")
-                    }
-
-                    val responseBody = response.body?.string()
-                        ?: throw Exception("Empty response from API")
-                    Log.i(TAG, "API response body: $responseBody")
-
-                    val result = parseMistralResponse(responseBody)
-                    onProgress(1f)
-                    result
-                }
-            } catch (e: java.net.SocketTimeoutException) {
-                Log.e(TAG, "Network timeout: ${e.message}")
-                throw Exception("Network timeout - unable to connect to Mistral API. Please check your internet connection.")
-            } catch (e: java.net.UnknownHostException) {
-                Log.e(TAG, "DNS resolution failed: ${e.message}")
-                throw Exception("DNS resolution failed - unable to connect to Mistral API. Please check your internet connection.")
-            } catch (e: java.net.ConnectException) {
-                Log.e(TAG, "Connection failed: ${e.message}")
-                throw Exception("Connection failed - unable to connect to Mistral API. Please check your internet connection and API key.")
-            }
-        } catch (e: Exception) {
-            if (cancelled) {
-                throw CancellationException("Transcription cancelled")
-            }
-            Log.e(TAG, "Transcription failed", e)
-            throw e
+            transcribeFile(model, source.file, source.fileName, source.mimeType, language, onProgress)
+        } finally {
+            if (source.temporary) source.file.delete()
         }
     }
 
-    private suspend fun transcribeWithPcm(
-        model: ImportedModel,
-        pcm16KhzMono: FloatArray,
-        language: LanguageOption,
-        onProgress: (Float) -> Unit
-    ): String = withContext(Dispatchers.IO) {
-        cancelled = false
-        onProgress(0f)
-
-        try {
-            Log.i(TAG, "Starting Mistral transcription with ${pcm16KhzMono.size} samples")
-
-            // Convert FloatArray to ByteArray (PCM16)
-            val pcmBytes = FloatArrayToByteArray(pcm16KhzMono)
-            Log.i(TAG, "Converted to ${pcmBytes.size} bytes of PCM data")
-
-            // Create temporary file for audio (WAV format)
-            val tempFile = File.createTempFile("audio", ".wav", context.cacheDir)
-            tempFile.deleteOnExit()
-
-            // Write WAV header and PCM data
-            FileOutputStream(tempFile).use { output ->
-                writeWavHeader(output, pcmBytes.size)
-                output.write(pcmBytes)
-            }
-            Log.i(TAG, "Created WAV file: ${tempFile.absolutePath}, size: ${tempFile.length()}")
-
-            onProgress(0.3f)
-
-            // Get API key from preferences or environment
-            val apiKey = getApiKey() ?: throw IllegalStateException("Mistral API key not configured")
-            Log.i(TAG, "API key found, length: ${apiKey.length}")
-
-            // Build request
-            val requestBody = MultipartBody.Builder()
-                .setType(MultipartBody.FORM)
-                .addFormDataPart(
-                    "file",
-                    "audio.wav",
-                    tempFile.asRequestBody("audio/wav".toMediaType())
-                )
-                .addFormDataPart("model", model.architecture)
-                .apply {
-                    if (language != LanguageOption.AUTO) {
-                        addFormDataPart("language", language.code)
-                    }
-                }
-                .build()
-
-            val request = Request.Builder()
-                .url(API_URL)
-                .header("Authorization", "Bearer $apiKey")
-                .post(requestBody)
-                .build()
-
-            onProgress(0.5f)
-
-            // Execute request
-            Log.i(TAG, "Executing API request to $API_URL")
-            try {
-                client.newCall(request).execute().use { response ->
-                    Log.i(TAG, "API response code: ${response.code}, message: ${response.message}")
-                    if (!response.isSuccessful) {
-                        val errorBody = response.body?.string() ?: "No error body"
-                        Log.e(TAG, "API request failed: ${response.code} - ${response.message}, body: $errorBody")
-                        throw Exception("API request failed: ${response.code} - ${response.message} - $errorBody")
-                    }
-
-                    val responseBody = response.body?.string()
-                        ?: throw Exception("Empty response from API")
-                    Log.i(TAG, "API response body: $responseBody")
-
-                    val result = parseMistralResponse(responseBody)
-                    onProgress(1f)
-                    result
-                }
-            } catch (e: java.net.SocketTimeoutException) {
-                Log.e(TAG, "Network timeout: ${e.message}")
-                throw Exception("Network timeout - unable to connect to Mistral API. Please check your internet connection.")
-            } catch (e: java.net.UnknownHostException) {
-                Log.e(TAG, "DNS resolution failed: ${e.message}")
-                throw Exception("DNS resolution failed - unable to connect to Mistral API. Please check your internet connection.")
-            } catch (e: java.net.ConnectException) {
-                Log.e(TAG, "Connection failed: ${e.message}")
-                throw Exception("Connection failed - unable to connect to Mistral API. Please check your internet connection and API key.")
-            }
-        } catch (e: Exception) {
-            if (cancelled) {
-                throw CancellationException("Transcription cancelled")
-            }
-            Log.e(TAG, "Transcription failed", e)
-            throw e
-         }
-     }
-
     override fun cancel() {
-        cancelled = true
+        activeCall?.cancel()
     }
 
     override fun close() {
-        cancelled = true
+        cancel()
     }
 
-    private fun FloatArrayToByteArray(floatArray: FloatArray): ByteArray {
+    private suspend fun transcribeFile(
+        model: ImportedModel,
+        file: File,
+        fileName: String,
+        mimeType: String,
+        language: LanguageOption,
+        onProgress: (Float) -> Unit
+    ): String {
+        coroutineContext.ensureActive()
+        onProgress(0f)
+        require(file.isFile && file.length() > 0) { "The selected audio file is empty or unavailable." }
+        val apiKey = getApiKey()?.trim().takeUnless { it.isNullOrEmpty() }
+            ?: throw IllegalStateException("Mistral API key not configured")
+
+        val requestBody = MultipartBody.Builder()
+            .setType(MultipartBody.FORM)
+            .addFormDataPart("file", fileName, file.asRequestBody(mimeType.toMediaType()))
+            .addFormDataPart("model", model.architecture)
+            .apply {
+                if (language != LanguageOption.AUTO) addFormDataPart("language", language.code)
+            }
+            .build()
+        val request = Request.Builder()
+            .url(API_URL)
+            .header("Authorization", "Bearer $apiKey")
+            .post(requestBody)
+            .build()
+
+        // Mistral exposes no upload or server-side transcription progress. Report an
+        // indeterminate state instead of leaving the UI falsely stuck at a fixed value.
+        onProgress(0f)
+        val call = client.newCall(request)
+        activeCall = call
+        try {
+            call.execute().use { response ->
+                coroutineContext.ensureActive()
+                if (!response.isSuccessful) {
+                    Log.w(TAG, "Mistral API request failed with HTTP ${response.code}")
+                    throw IllegalStateException(apiErrorMessage(response.code))
+                }
+                val responseBody = response.body?.string()
+                    ?: throw IllegalStateException("Empty response from Mistral API")
+                val result = parseMistralResponse(responseBody)
+                onProgress(1f)
+                return result
+            }
+        } catch (e: java.net.SocketTimeoutException) {
+            throw IllegalStateException("Network timeout while contacting Mistral API.", e)
+        } catch (e: java.net.UnknownHostException) {
+            throw IllegalStateException("Unable to reach Mistral API. Check your internet connection.", e)
+        } catch (e: java.net.ConnectException) {
+            throw IllegalStateException("Unable to connect to Mistral API. Check your internet connection.", e)
+        } catch (e: java.io.IOException) {
+            if (call.isCanceled()) throw CancellationException("Transcription cancelled")
+            throw IllegalStateException("Network error while contacting Mistral API.", e)
+        } finally {
+            if (activeCall === call) activeCall = null
+        }
+    }
+
+    private fun stageSourceFile(uri: Uri): UploadSource {
+        if (uri.scheme == "file") {
+            val file = uri.path?.let(::File)
+            if (file?.isFile == true) return UploadSource(file, file.name, mimeTypeFor(file.name), false)
+        }
+
+        val resolver = context.contentResolver
+        val fileName = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+            ?.use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+            ?.takeIf { it.isNotBlank() }
+            ?: "audio"
+        val tempFile = File.createTempFile("mistral-", fileName.safeSuffix(), context.cacheDir)
+        try {
+            resolver.openInputStream(uri)?.use { input ->
+                FileOutputStream(tempFile).use(input::copyTo)
+            } ?: throw IllegalStateException("Failed to open the selected audio file.")
+            return UploadSource(tempFile, fileName, resolver.getType(uri) ?: mimeTypeFor(fileName), true)
+        } catch (error: Throwable) {
+            tempFile.delete()
+            throw error
+        }
+    }
+
+    private fun String.safeSuffix(): String {
+        val extension = substringAfterLast('.', "").takeIf { it.matches(Regex("[A-Za-z0-9]{1,10}")) }
+        return extension?.let { ".${it.lowercase()}" } ?: ".audio"
+    }
+
+    private fun mimeTypeFor(fileName: String): String =
+        URLConnection.guessContentTypeFromName(fileName) ?: "application/octet-stream"
+
+    private fun apiErrorMessage(statusCode: Int): String = when (statusCode) {
+        401, 403 -> "Mistral API rejected the API key."
+        413 -> "The selected audio file is too large for Mistral API."
+        429 -> "Mistral API rate limit reached. Please try again shortly."
+        in 500..599 -> "Mistral API is temporarily unavailable. Please try again shortly."
+        else -> "Mistral API request failed (HTTP $statusCode)."
+    }
+
+    private fun floatArrayToLittleEndianPcm16(floatArray: FloatArray): ByteArray {
         val byteArray = ByteArray(floatArray.size * 2)
         for (i in floatArray.indices) {
-            val floatValue = floatArray[i].coerceIn(-1f, 1f)
-            val intValue = (floatValue * 32767).toInt()
-            byteArray[i * 2] = (intValue ushr 8).toByte()
-            byteArray[i * 2 + 1] = intValue.toByte()
+            val intValue = (floatArray[i].coerceIn(-1f, 1f) * 32767).toInt()
+            byteArray[i * 2] = intValue.toByte()
+            byteArray[i * 2 + 1] = (intValue shr 8).toByte()
         }
         return byteArray
     }
 
     private fun writeWavHeader(output: FileOutputStream, dataSize: Int) {
-        val sampleRate = 16000
+        val sampleRate = 16_000
         val bitsPerSample = 16
         val channels = 1
         val byteRate = sampleRate * channels * bitsPerSample / 8
         val blockAlign = channels * bitsPerSample / 8
-
         val header = ByteArray(44)
-        // RIFF header
-        header[0] = 'R'.code.toByte()
-        header[1] = 'I'.code.toByte()
-        header[2] = 'F'.code.toByte()
-        header[3] = 'F'.code.toByte()
-        // File size
-        val fileSize = dataSize + 36
-        header[4] = (fileSize and 0xFF).toByte()
-        header[5] = ((fileSize ushr 8) and 0xFF).toByte()
-        header[6] = ((fileSize ushr 16) and 0xFF).toByte()
-        header[7] = ((fileSize ushr 24) and 0xFF).toByte()
-        // WAVE format
-        header[8] = 'W'.code.toByte()
-        header[9] = 'A'.code.toByte()
-        header[10] = 'V'.code.toByte()
-        header[11] = 'E'.code.toByte()
-        // fmt chunk
-        header[12] = 'f'.code.toByte()
-        header[13] = 'm'.code.toByte()
-        header[14] = 't'.code.toByte()
-        header[15] = ' '.code.toByte()
-        // fmt chunk size (16 bytes)
-        header[16] = 16
-        header[17] = 0
-        header[18] = 0
-        header[19] = 0
-        // Audio format (1 = PCM)
-        header[20] = 1
-        header[21] = 0
-        // Channels
-        header[22] = channels.toByte()
-        header[23] = 0
-        // Sample rate
-        header[24] = (sampleRate and 0xFF).toByte()
-        header[25] = ((sampleRate ushr 8) and 0xFF).toByte()
-        header[26] = ((sampleRate ushr 16) and 0xFF).toByte()
-        header[27] = ((sampleRate ushr 24) and 0xFF).toByte()
-        // Byte rate
-        header[28] = (byteRate and 0xFF).toByte()
-        header[29] = ((byteRate ushr 8) and 0xFF).toByte()
-        header[30] = ((byteRate ushr 16) and 0xFF).toByte()
-        header[31] = ((byteRate ushr 24) and 0xFF).toByte()
-        // Block align
-        header[32] = blockAlign.toByte()
-        header[33] = 0
-        // Bits per sample
-        header[34] = bitsPerSample.toByte()
-        header[35] = 0
-        // data chunk
-        header[36] = 'd'.code.toByte()
-        header[37] = 'a'.code.toByte()
-        header[38] = 't'.code.toByte()
-        header[39] = 'a'.code.toByte()
-        // data chunk size
-        header[40] = (dataSize and 0xFF).toByte()
-        header[41] = ((dataSize ushr 8) and 0xFF).toByte()
-        header[42] = ((dataSize ushr 16) and 0xFF).toByte()
-        header[43] = ((dataSize ushr 24) and 0xFF).toByte()
 
+        header[0] = 'R'.code.toByte(); header[1] = 'I'.code.toByte()
+        header[2] = 'F'.code.toByte(); header[3] = 'F'.code.toByte()
+        writeIntLe(header, 4, dataSize + 36)
+        header[8] = 'W'.code.toByte(); header[9] = 'A'.code.toByte()
+        header[10] = 'V'.code.toByte(); header[11] = 'E'.code.toByte()
+        header[12] = 'f'.code.toByte(); header[13] = 'm'.code.toByte()
+        header[14] = 't'.code.toByte(); header[15] = ' '.code.toByte()
+        writeIntLe(header, 16, 16)
+        writeShortLe(header, 20, 1)
+        writeShortLe(header, 22, channels)
+        writeIntLe(header, 24, sampleRate)
+        writeIntLe(header, 28, byteRate)
+        writeShortLe(header, 32, blockAlign)
+        writeShortLe(header, 34, bitsPerSample)
+        header[36] = 'd'.code.toByte(); header[37] = 'a'.code.toByte()
+        header[38] = 't'.code.toByte(); header[39] = 'a'.code.toByte()
+        writeIntLe(header, 40, dataSize)
         output.write(header)
     }
 
-@Throws(Exception::class)
-    private fun parseMistralResponse(responseBody: String): String {
-         val json = JSONObject(responseBody)
-         Log.i(TAG, "Full API response: $json")
-         
-         val text = json.optString("text", "")
-         val errorMsg = json.optString("error", null)
-         val segments = json.optJSONArray("segments")
-         
-         Log.i(TAG, "Extracted text: '$text'")
-         Log.i(TAG, "Error field: $errorMsg")
-         Log.i(TAG, "Segments: $segments")
-
-         if (text.isEmpty()) {
-             val message = if (segments != null && segments.length() == 0) {
-                 "No speech detected in audio. Please check if the audio contains clear speech."
-             } else {
-                 errorMsg ?: "Empty result"
-             }
-             Log.e(TAG, "Empty transcription result: $message")
-             throw Exception("Transcription failed: $message")
-         }
-         return text
-     }
-
-     private fun getApiKey(): String? {
-        // Try to get from environment first
-        System.getenv("MISTRAL_API_KEY")?.let { return it }
-        
-        // Try to get from Android preferences
-        val prefs = context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
-        return prefs.getString("mistral_api_key", null)
+    private fun writeIntLe(bytes: ByteArray, offset: Int, value: Int) {
+        repeat(4) { index -> bytes[offset + index] = (value shr (index * 8)).toByte() }
     }
+
+    private fun writeShortLe(bytes: ByteArray, offset: Int, value: Int) {
+        bytes[offset] = value.toByte()
+        bytes[offset + 1] = (value shr 8).toByte()
+    }
+
+    private fun parseMistralResponse(responseBody: String): String {
+        val json = JSONObject(responseBody)
+        val text = json.optString("text", "").trim()
+        if (text.isEmpty()) {
+            val segments = json.optJSONArray("segments")
+            val message = if (segments != null && segments.length() == 0) {
+                "No speech detected in audio. Please check that it contains clear speech."
+            } else {
+                json.optString("error").ifBlank { "Mistral API returned an empty transcription." }
+            }
+            throw IllegalStateException(message)
+        }
+        return text
+    }
+
+    private fun getApiKey(): String? {
+        System.getenv("MISTRAL_API_KEY")?.let { return it }
+        return apiKeyStore.get()
+    }
+
+    private data class UploadSource(
+        val file: File,
+        val fileName: String,
+        val mimeType: String,
+        val temporary: Boolean
+    )
 }
