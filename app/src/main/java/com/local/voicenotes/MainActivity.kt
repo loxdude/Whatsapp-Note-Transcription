@@ -1,5 +1,7 @@
 package com.local.voicenotes
 
+import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
@@ -15,6 +17,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -28,6 +31,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.ViewRootForInspector
 import androidx.compose.material3.Button
@@ -234,7 +238,8 @@ private fun ApiKeyDialog(
     onDismiss: () -> Unit
 ) {
     var apiKey by remember { mutableStateOf(currentApiKey ?: "") }
-    
+    val context = LocalContext.current
+
     androidx.compose.material3.AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Mistral API Key") },
@@ -243,7 +248,15 @@ private fun ApiKeyDialog(
                 Text("Enter your Mistral API key to use the Mistral Transcription API.")
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Text("Need a key?", fontWeight = FontWeight.SemiBold)
-                    Text("1. Open console.mistral.ai")
+                    Text(
+                        "1. Open console.mistral.ai",
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.clickable {
+                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://console.mistral.ai"))
+                            context.startActivity(intent)
+                        }
+                    )
                     Text("2. Create or copy an API key")
                     Text("3. Paste it here and tap Save")
                 }
