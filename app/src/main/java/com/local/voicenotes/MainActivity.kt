@@ -241,6 +241,12 @@ private fun ApiKeyDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Enter your Mistral API key to use the Mistral Transcription API.")
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text("Need a key?", fontWeight = FontWeight.SemiBold)
+                    Text("1. Open console.mistral.ai")
+                    Text("2. Create or copy an API key")
+                    Text("3. Paste it here and tap Save")
+                }
                 OutlinedTextField(
                     value = apiKey,
                     onValueChange = { apiKey = it },
