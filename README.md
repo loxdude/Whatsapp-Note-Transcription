@@ -1,6 +1,6 @@
 # Voice Note Transcriber · LiteRT
 
-A high-performance **offline** Android app for transcribing voice notes using **Qualcomm NPU** acceleration via **LiteRT** and the **Parakeet TDT v3** model. Optimized for Snapdragon-powered devices (e.g., SM8650).
+An **offline** Android app for transcribing voice notes using **LiteRT** and **Parakeet TDT v3**, with portable CPU models and chip-specific Qualcomm NPU exports.
 
 ---
 
@@ -42,6 +42,38 @@ Place the **Parakeet TDT v3** model anywhere on your phone (where the android fi
 parakeet_tdt_0.6b_v3_5s_f32_stateful_Qualcomm_SM8650.tflite
 ```
 *Download the model from [Huggingface](https://huggingface.co/litert-community/parakeet-tdt-0.6b-v3/tree/main)*
+
+Choose the **stateful 5s f32** export for your phone:
+
+| Phone / chipset | Export suffix | Validation |
+|---|---|---|
+| Galaxy Z Fold 4 / Snapdragon 8+ Gen 1 (SM8475) | `parakeet_tdt_0.6b_v3_5s_i8_stateful.tflite` (CPU) | Speech verified; recommended for Fold 4 |
+| Snapdragon 8 Gen 1 (SM8450) | `Qualcomm_SM8450.tflite` | Requires device testing |
+| Snapdragon 8 Gen 2 (SM8550) | `Qualcomm_SM8550.tflite` | Requires device testing |
+| Snapdragon 8 Gen 3 (SM8650) | `Qualcomm_SM8650.tflite` | Original target |
+| Snapdragon 8 Elite (SM8750) | `Qualcomm_SM8750.tflite` | Runtime included; requires device testing |
+
+The portable `parakeet_tdt_0.6b_v3_5s_i8_stateful.tflite` and
+`parakeet_tdt_0.6b_v3_5s_f32_stateful.tflite` exports automatically use CPU.
+Use the quantized i8 model on Fold 4. CPU processing stays entirely offline;
+it does not call the Mistral API. Chip-specific exports use NPU.
+
+The same APK contains the QNN runtimes for these generations; import the appropriate
+model through the app. Models are not bundled in the APK. SM8450 and SM8475 share
+HTP v69. LiteRT 2.1.6's built-in device allowlist omits both, so the app explicitly
+allows those Qualcomm chips while retaining native QNN model validation. The
+Snapdragon 8 Elite uses a different NPU generation and needs its own export.
+See [LiteRT Qualcomm support](https://developers.google.com/edge/litert/next/qualcomm).
+
+Fold 4 testing (2026-09-09): the SM8450 NPU export loads but returns blank output
+for both a voice-note excerpt and a public speech fixture, taking about 35 seconds
+per 5-second chunk. Its SHA-256 matches the publisher. The portable i8 CPU export
+transcribed the same voice-note excerpt in 0.78 seconds (41 tokens). These timings
+are individual measurements, not guarantees. SM8750 hardware has not been tested.
+The full 127.8-second voice note completed in 13.8 seconds on Fold 4 with app
+0.3.0 (1.05 seconds audio decoding, 12.69 seconds inference, 592 tokens).
+The device test `QualcommNpuSmokeTest` uses the selected local model and skips when
+none is selected.
 
 ### 3. (Optional) Add a Mistral API Key
 
@@ -110,7 +142,7 @@ Transcriber-android-litert/
 | **Library** | **Version** | **Purpose** |
 |------------|------------|------------|
 | `com.google.ai.edge.litert:litert` | `2.1.6` | LiteRT runtime for NPU acceleration. |
-| `com.qualcomm.qti:qnn-runtime` | `2.48.0` | Qualcomm Neural Network runtime. |
+| `com.qualcomm.qti:qnn-runtime` | `2.47.0` | Qualcomm Neural Network runtime, matched to the bundled dispatch library. |
 | `androidx.compose:compose-bom` | `2024.10.01` | Jetpack Compose UI framework. |
 | `org.jetbrains.kotlinx:kotlinx-coroutines-android` | `1.8.0` | Async transcription support. |
 | `androidx.datastore:datastore-preferences` | `1.1.1` | Persist user preferences. |
@@ -147,14 +179,29 @@ The app logs performance metrics for:
 
 View logs in **Android Studio Logcat** or via `adb logcat`.
 
+### NPU reload regression
+
+QNN 2.48.0 reproducibly fails on the Fold 4 when a loaded model is closed and
+reopened in the same app process: DSP teardown errors are followed by
+`Failed to compile model`. QNN is pinned to 2.47.0, matching the bundled dispatch
+library. Native creation, inference and disposal also run on one worker so disposal
+cannot race an active inference call.
+
+`QualcommNpuSmokeTest` exercises three close/reload cycles before inference.
+Its optional instrumentation argument `selectedAudio=true` additionally transcribes
+the highest-energy five-second excerpt of the selected audio locally and requires
+a nonempty result. `audioPath` supplies a test WAV instead; `cpuModelPath` supplies
+an app-readable portable model for comparison without changing the selection.
+
 ---
 
 ## 🔄 Custom Models
 
 To use a custom model:
-1. Place the `.tflite` file in the project root or `app/src/main/assets/`.
-2. Update `ModelRepository.kt` to recognize the new model.
-3. Ensure the model is compatible with **LiteRT + QNN NPU**.
+1. Download the stateful `.tflite` export matching your phone to the phone.
+2. Import it using the app's model file picker; no source changes are needed.
+3. Select it and wait for NPU initialization. Model notes identify the export target
+   and device; initialization errors include the chip and native failure reason.
 
 ---
 

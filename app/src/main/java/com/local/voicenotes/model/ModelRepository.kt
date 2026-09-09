@@ -3,6 +3,7 @@ package com.local.voicenotes.model
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.provider.OpenableColumns
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -20,16 +21,20 @@ import java.security.MessageDigest
 private val Context.modelDataStore by preferencesDataStore("litert_models")
 
 /**
- * Stores a persistent Storage Access Framework URI rather than copying a 1.2 GB
- * model into app-private storage. This keeps one model copy on the phone and
- * lets LiteRT memory-map it directly.
+ * Stores a persistent Storage Access Framework URI. The inference backend caches
+ * the model in app-private storage because CompiledModel requires a file path.
  */
 class ModelRepository(private val context: Context) {
     private val modelsKey = stringPreferencesKey("imported_models")
     private val selectedKey = stringPreferencesKey("selected_model")
 
     suspend fun models(): List<ImportedModel> = context.modelDataStore.data.map { prefs ->
-        val importedModels = decodeModels(prefs[modelsKey].orEmpty()).filter(::isReadable)
+        val importedModels = decodeModels(prefs[modelsKey].orEmpty()).filter(::isReadable).map { model ->
+            if (model.enabled && (model.backend.startsWith("litert-qnn") || model.backend == "litert-cpu")) {
+                model.copy(backend = QualcommModels.backend(model.displayName),
+                    note = QualcommModels.note(model.displayName, Build.SOC_MODEL))
+            } else model
+        }
         // Add built-in Mistral API model
         val mistralModel = ImportedModel(
             id = "mistral-api",
@@ -82,13 +87,11 @@ class ModelRepository(private val context: Context) {
         val lowerName = displayName.lowercase()
         val isParakeet = "parakeet" in lowerName && ("tdt" in lowerName || "0.6b_v3" in lowerName)
         val isStateful = "stateful" in lowerName
-        val isSm8650 = "sm8650" in lowerName
         val enabled = isParakeet && isStateful
         val note = when {
             !isParakeet -> "Not recognized as a Parakeet TDT v3 export"
             !isStateful -> "Stateless 5 s export; select the stateful model for WhatsApp notes"
-            isSm8650 -> "Ready · stateful · Snapdragon 8 Gen 3 NPU"
-            else -> "Ready · stateful generic model (SM8650 export is preferred)"
+            else -> QualcommModels.note(displayName, Build.SOC_MODEL)
         }
         val hash = MessageDigest.getInstance("SHA-256")
             .digest("${uri}|$sourceLength".encodeToByteArray())
@@ -99,7 +102,7 @@ class ModelRepository(private val context: Context) {
             path = uri.toString(),
             sizeBytes = sourceLength,
             architecture = "parakeet-tdt-0.6b-v3",
-            backend = if (isSm8650) "litert-qnn-sm8650" else "litert-qnn",
+            backend = QualcommModels.backend(displayName),
             enabled = enabled,
             note = note
         )

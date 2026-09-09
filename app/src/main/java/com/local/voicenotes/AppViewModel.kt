@@ -58,6 +58,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val mutableState = MutableStateFlow(AppUiState())
     private val backends: Map<String, TranscriptionBackend> = mapOf(
         "litert-qnn" to liteRtBackend,
+        "litert-cpu" to liteRtBackend,
         "litert-qnn-sm8650" to liteRtBackend,
         "mistral-api" to mistralBackend
     )
@@ -121,11 +122,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 val model = repository.import(uri) { fraction ->
                     mutableState.value = mutableState.value.copy(progress = TranscriptionProgress.Importing(fraction))
                 }
+                if (model.enabled) {
+                    mutableState.value = mutableState.value.copy(selectedModelId = model.id)
+                }
                 refreshModels().join()
-                mutableState.value = mutableState.value.copy(
-                    progress = if (model.enabled) TranscriptionProgress.Idle
-                    else TranscriptionProgress.Failed(model.note)
-                )
+                if (!model.enabled) {
+                    mutableState.value = mutableState.value.copy(progress = TranscriptionProgress.Failed(model.note))
+                }
             } catch (t: Throwable) {
                 mutableState.value = mutableState.value.copy(
                     progress = TranscriptionProgress.Failed(t.message ?: "Model import failed.")

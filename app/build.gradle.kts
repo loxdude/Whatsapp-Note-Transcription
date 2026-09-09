@@ -14,8 +14,8 @@ android {
         applicationId = "com.local.voicenotes.litert"
         minSdk = 31
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.2.0-litert"
+        versionCode = 3
+        versionName = "0.3.0-litert"
         ndk { abiFilters += "arm64-v8a" }
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -62,7 +62,9 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.datastore:datastore-preferences:1.1.1")
     implementation("com.google.ai.edge.litert:litert:2.1.6")
-    implementation("com.qualcomm.qti:qnn-runtime:2.48.0")
+    // Matches the bundled LiteRT Qualcomm dispatch. 2.48.0 breaks HTP v69
+    // context teardown/reload on SM8475 (covered by QualcommNpuSmokeTest).
+    implementation("com.qualcomm.qti:qnn-runtime:2.47.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     debugImplementation("androidx.compose.ui:ui-tooling")
 
