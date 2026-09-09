@@ -21,9 +21,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -32,10 +30,16 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.platform.ViewRootForInspector
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -118,104 +122,157 @@ private fun TranscriberScreen(state: AppUiState, viewModel: AppViewModel) {
     val modelPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(viewModel::importModel)
     }
-    var showApiKeyDialog by remember { mutableStateOf(false) }
+    var showApiKeyDialog by rememberSaveable { mutableStateOf(false) }
+    var showSettings by rememberSaveable { mutableStateOf(false) }
+    val clipboard = LocalClipboardManager.current
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(top = 50.dp, start = 20.dp, end = 20.dp, bottom = 20.dp),
+            modifier = Modifier.fillMaxSize().safeDrawingPadding().imePadding()
+                .padding(horizontal = 20.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("Voice notes", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-                IconButton(onClick = { showApiKeyDialog = true }) {
-                    Icon(Icons.Default.Settings, contentDescription = "Settings")
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("Voice notes", modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                IconButton(onClick = { showSettings = true }) {
+                    Icon(Icons.Default.Settings, contentDescription = "Transcription settings")
                 }
             }
 
-            SectionCard("Settings") {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("Audio (MP3, Opus, M4A, AAC, WAV)", fontWeight = FontWeight.SemiBold)
-                    OutlinedButton(
-                        onClick = { audioPicker.launch(arrayOf("audio/*", "application/octet-stream")) },
-                        enabled = !state.busy,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(if (state.audioName.isBlank()) "Choose a voice note" else state.audioName,
-                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surface) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("AUDIO", style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                            Text(state.audioName.ifBlank { "Choose a voice note" },
+                                style = MaterialTheme.typography.titleSmall, maxLines = 2,
+                                overflow = TextOverflow.Ellipsis)
+                        }
+                        TextButton(
+                            onClick = { audioPicker.launch(arrayOf("audio/*", "application/octet-stream")) },
+                            enabled = !state.busy
+                        ) { Text("Select audio") }
                     }
+                    Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                        Text("TRANSCRIPTION", style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                        val modelSummary = when (state.selectedModel?.backend) {
+                            "mistral-api" -> "Cloud model: Mistral"
+                            null -> "No model selected"
+                            else -> "On-device model: Parakeet"
+                        }
+                        Text(modelSummary, style = MaterialTheme.typography.labelMedium)
+                        Text("Language: ${state.language.label}",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    if (state.busy || state.progress !is TranscriptionProgress.Idle) {
+                        ProgressArea(state)
+                    }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = viewModel::transcribe, enabled = state.canTranscribe,
+                            modifier = Modifier.weight(1f).height(48.dp)) {
+                            Text(if (state.busy) "Working..." else if (state.transcript.isNotBlank()) "Transcribe again" else "Transcribe")
+                        }
+                        if (state.busy) OutlinedButton(onClick = viewModel::cancel,
+                            modifier = Modifier.height(48.dp)) { Text("Cancel") }
+                    }
+                }
+            }
 
-                    Text("Model", fontWeight = FontWeight.SemiBold)
-                    var modelExpanded by remember { mutableStateOf(false) }
-                    ExposedDropdownMenuBox(modelExpanded, { modelExpanded = !modelExpanded && !state.busy }) {
-                        OutlinedTextField(
-                            value = state.selectedModel?.displayName ?: "No model imported",
-                            onValueChange = {}, readOnly = true,
-                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(modelExpanded) },
-                            modifier = Modifier.menuAnchor().fillMaxWidth(),
-                            label = { Text("LiteRT model") }
-                        )
-                        DropdownMenu(expanded = modelExpanded, onDismissRequest = { modelExpanded = false }) {
-                            state.models.forEach { model ->
-                                DropdownMenuItem(
-                                    text = {
-                                        Column {
-                                            Text(model.displayName)
-                                            Text(model.note, style = MaterialTheme.typography.bodySmall,
-                                                color = if (model.enabled) Color(0xFF49664B) else Color(0xFF9A4545))
-                                        }
-                                    },
-                                    enabled = model.enabled,
-                                    onClick = { viewModel.selectModel(model.id); modelExpanded = false }
-                                )
+            Surface(modifier = Modifier.fillMaxWidth().weight(1f),
+                shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surface) {
+                Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text("Transcript", modifier = Modifier.weight(1f),
+                            style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                        TextButton(onClick = { clipboard.setText(AnnotatedString(state.transcript)) },
+                            enabled = state.transcript.isNotBlank()) { Text("Copy") }
+                    }
+                    BasicTextField(
+                        value = state.transcript, onValueChange = viewModel::editTranscript,
+                        modifier = Modifier.fillMaxWidth().weight(1f).padding(bottom = 16.dp)
+                            .semantics { contentDescription = "Transcript" },
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
+                        cursorBrush = Brush.verticalGradient(listOf(MaterialTheme.colorScheme.primary, MaterialTheme.colorScheme.primary)),
+                        decorationBox = { innerTextField ->
+                            Box {
+                                if (state.transcript.isBlank()) {
+                                    Text(if (state.busy) "Your transcript is on its way..."
+                                        else "Choose audio, then tap Transcribe.\nYour words will appear here.",
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                                innerTextField()
                             }
                         }
-                    }
-                    TextButton(onClick = { modelPicker.launch(arrayOf("application/octet-stream", "*/*")) },
-                        enabled = !state.busy) { Text("Import .tflite") }
+                    )
+                }
+            }
+        }
+    }
 
-                    Text("Language", fontWeight = FontWeight.SemiBold)
-                    var langExpanded by remember { mutableStateOf(false) }
-                    ExposedDropdownMenuBox(langExpanded, { langExpanded = !langExpanded && !state.busy }) {
-                        OutlinedTextField(
-                            value = state.language.label, onValueChange = {}, readOnly = true,
-                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(langExpanded) },
-                            modifier = Modifier.menuAnchor().fillMaxWidth()
-                        )
-                        DropdownMenu(expanded = langExpanded, onDismissRequest = { langExpanded = false }) {
-                            LanguageOption.entries.forEach { language ->
-                                DropdownMenuItem(text = { Text(language.label) }, onClick = {
-                                    viewModel.setLanguage(language); langExpanded = false
-                                })
-                            }
+    if (showSettings) {
+        ModalBottomSheet(onDismissRequest = { showSettings = false }) {
+            Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+                .padding(start = 24.dp, end = 24.dp, bottom = 24.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("Transcription settings", style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold)
+                Text("Model", fontWeight = FontWeight.SemiBold)
+                var modelExpanded by remember { mutableStateOf(false) }
+                ExposedDropdownMenuBox(modelExpanded, { modelExpanded = !modelExpanded && !state.busy }) {
+                    OutlinedTextField(
+                        value = state.selectedModel?.displayName ?: "No model imported",
+                        onValueChange = {}, readOnly = true,
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(modelExpanded) },
+                        modifier = Modifier.menuAnchor().fillMaxWidth(),
+                        label = { Text("Transcription model") }
+                    )
+                    DropdownMenu(expanded = modelExpanded, onDismissRequest = { modelExpanded = false }) {
+                        state.models.forEach { model ->
+                            DropdownMenuItem(
+                                text = {
+                                    Column {
+                                        Text(model.displayName)
+                                        Text(model.note, style = MaterialTheme.typography.bodySmall,
+                                            color = if (model.enabled) Color(0xFF49664B) else Color(0xFF9A4545))
+                                    }
+                                },
+                                enabled = model.enabled,
+                                onClick = { viewModel.selectModel(model.id); modelExpanded = false }
+                            )
                         }
                     }
                 }
-            }
+                TextButton(onClick = { modelPicker.launch(arrayOf("application/octet-stream", "*/*")) },
+                    enabled = !state.busy) { Text("Import .tflite") }
 
-            ProgressArea(state)
-
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Button(
-                    onClick = viewModel::transcribe, enabled = state.canTranscribe,
-                    modifier = Modifier.weight(1f).height(48.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
-                ) { Text("Transcribe") }
-                if (state.busy) OutlinedButton(onClick = viewModel::cancel, modifier = Modifier.height(48.dp)) {
-                    Text("Cancel")
+                Text("Language", fontWeight = FontWeight.SemiBold)
+                var langExpanded by remember { mutableStateOf(false) }
+                ExposedDropdownMenuBox(langExpanded, { langExpanded = !langExpanded && !state.busy }) {
+                    OutlinedTextField(
+                        value = state.language.label, onValueChange = {}, readOnly = true,
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(langExpanded) },
+                        modifier = Modifier.menuAnchor().fillMaxWidth()
+                    )
+                    DropdownMenu(expanded = langExpanded, onDismissRequest = { langExpanded = false }) {
+                        LanguageOption.entries.forEach { language ->
+                            DropdownMenuItem(text = { Text(language.label) }, onClick = {
+                                viewModel.setLanguage(language); langExpanded = false
+                            })
+                        }
+                    }
+                }
+                OutlinedButton(onClick = { showSettings = false; showApiKeyDialog = true },
+                    enabled = !state.busy, modifier = Modifier.fillMaxWidth()) {
+                    Text("Add or change Mistral API key")
+                }
+                Button(onClick = { showSettings = false }, modifier = Modifier.fillMaxWidth()) {
+                    Text("Done")
                 }
             }
-
-            OutlinedTextField(
-                value = state.transcript, onValueChange = viewModel::editTranscript,
-                modifier = Modifier.fillMaxWidth().weight(1f),
-                label = { Text("Transcript") }, placeholder = { Text("The transcript will appear here.") }
-            )
         }
     }
 
@@ -284,17 +341,6 @@ private fun ApiKeyDialog(
 }
 
 @Composable
-private fun SectionCard(title: String, content: @Composable ColumnScope.() -> Unit) {
-    Column(
-        modifier = Modifier.fillMaxWidth().background(Color.White, RoundedCornerShape(12.dp)).padding(12.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        Text(title, fontWeight = FontWeight.SemiBold)
-        content()
-    }
-}
-
-@Composable
 private fun ProgressArea(state: AppUiState) {
     val (label, fraction) = when (val progress = state.progress) {
         TranscriptionProgress.Idle -> "Ready" to null
@@ -309,10 +355,10 @@ private fun ProgressArea(state: AppUiState) {
     }
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(label, color = if (state.progress is TranscriptionProgress.Failed) Color(0xFF9A4545) else Color(0xFF535950))
-            if (state.busy || state.elapsedMillis > 0) Text(formatElapsed(state.elapsedMillis), color = Color(0xFF535950))
+            Text(label, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = if (state.progress is TranscriptionProgress.Failed) Color(0xFF9A4545) else Color(0xFF535950))
+            if (state.busy || state.elapsedMillis > 0) Text(formatElapsed(state.elapsedMillis), style = MaterialTheme.typography.bodySmall, color = Color(0xFF535950))
         }
-        if (state.busy || fraction != null) {
+        if (state.busy) {
             if (state.progress is TranscriptionProgress.Transcribing &&
                 state.selectedModel?.backend == "mistral-api") {
                 MistralProgressIndicator(Modifier.fillMaxWidth())
