@@ -1,229 +1,187 @@
-# Voice Note Transcriber · LiteRT
+# Voice Note Transcriber
 
-An **offline** Android app for transcribing voice notes using **LiteRT** and **Parakeet TDT v3**, with portable CPU models and chip-specific Qualcomm NPU exports.
+Voice Note Transcriber is an Android app that turns audio files into editable text. It can run Parakeet TDT v3 on the phone through LiteRT, or send the original audio file to Mistral's Voxtral Mini API.
 
----
+The app does not include a Parakeet model. Import a stateful `.tflite` export after installation.
 
-## ✨ Features
+## What it does
 
-- **Dual Transcription Backends**: Choose between offline **LiteRT/Parakeet** or online **Mistral API** transcription.
-- **Mistral Voxtral Mini (API)**: Cloud-based transcription via the [Mistral AI API](https://mistral.ai) using the **voxtral-mini-latest** model. Requires an API key and internet connection.
-- **Offline Transcription**: No internet required, fully local processing.
-- **NPU Acceleration**: Leverages **Qualcomm’s QNN runtime** via **LiteRT** for low-latency inference.
-- **Multi-Format Support**: Works with **WhatsApp Opus, MP3, M4A, AAC, WAV** (up to 15 minutes).
-- **Multi-Language**: Auto-detect or manually select from **13 languages** (German, English, Spanish, French, Italian, Portuguese, Dutch, Polish, Turkish, Japanese, Korean, Chinese).
-- **Model Management**: Import custom **TFLite models** (e.g., `parakeet_tdt_0.6b_v3_5s_f32_stateful_Qualcomm_SM8650.tflite`).
-- **Secure API Key Storage**: Mistral API key is encrypted with an **Android Keystore**-backed AES-GCM key.
-- **Benchmarking**: Logs audio decode time, inference latency, and total processing time.
-- **Modern UI**: Built with **Jetpack Compose** and **Material 3**.
+- Transcribes OGG and Opus voice notes, MP3, M4A, AAC, and WAV files.
+- Runs portable Parakeet models on the CPU without a network connection.
+- Runs chip-specific Parakeet exports through LiteRT and Qualcomm QNN.
+- Offers `voxtral-mini-latest` as an online alternative.
+- Supports automatic language detection and 12 named languages: German, English, Spanish, French, Italian, Portuguese, Dutch, Polish, Turkish, Japanese, Korean, and Chinese.
+- Keeps the transcript editable and provides a copy button.
+- Shows model loading, audio decoding, transcription progress, elapsed time, cancellation, and errors.
+- Remembers the selected audio and model between launches.
+- Stores the Mistral API key with an AES-GCM key held by Android Keystore.
 
----
+Local decoding accepts up to 15 minutes of audio. The Mistral path uploads the selected source file instead of decoding it on the phone.
 
-## 📋 Requirements
+## Current interface
 
-- **Android SDK**: `minSdk=31`, `targetSdk=35`
-- **ABI**: `arm64-v8a` (64-bit ARM)
-- **Hardware**: Qualcomm Snapdragon NPU (e.g., SM8650)
-- **Build Tools**: Gradle 8.6.1, Kotlin 2.3.0
+The main screen now keeps the audio picker, current backend, language, progress, and transcription button in one card. The transcript fills the rest of the screen and can be edited or copied. Model import, language selection, and the Mistral API key are in the settings sheet.
 
----
+The screen stays awake while a transcription is running. A cancel button appears during active work.
 
-## 🛠 Setup
+## Requirements
 
-### 1. Clone the Repository
-```bash
-git clone https://github.com/your-repo/Transcriber-android-litert.git
-cd Transcriber-android-litert
-```
+| Item | Requirement |
+| --- | --- |
+| Android | Android 12 or newer, API 31 |
+| CPU architecture | `arm64-v8a` |
+| Build JDK | Java 17 |
+| Android SDK | Compile SDK 35 |
+| Gradle plugin | Android Gradle Plugin 8.6.1 |
+| Kotlin | 2.3.0 |
 
-### 2. Add the Default Model
-Place the **Parakeet TDT v3** model anywhere on your phone (where the android file selector has access to):
-```
-parakeet_tdt_0.6b_v3_5s_f32_stateful_Qualcomm_SM8650.tflite
-```
-*Download the model from [Huggingface](https://huggingface.co/litert-community/parakeet-tdt-0.6b-v3/tree/main)*
+A portable CPU model can run on an ARM64 Android device. QNN acceleration requires a compatible Qualcomm chip and an export built for that NPU generation.
 
-Choose the **stateful 5s f32** export for your phone:
+## Build and install
 
-| Phone / chipset | Export suffix | Validation |
-|---|---|---|
-| Galaxy Z Fold 4 / Snapdragon 8+ Gen 1 (SM8475) | `parakeet_tdt_0.6b_v3_5s_i8_stateful.tflite` (CPU) | Speech verified; recommended for Fold 4 |
-| Snapdragon 8 Gen 1 (SM8450) | `Qualcomm_SM8450.tflite` | Requires device testing |
-| Snapdragon 8 Gen 2 (SM8550) | `Qualcomm_SM8550.tflite` | Requires device testing |
-| Snapdragon 8 Gen 3 (SM8650) | `Qualcomm_SM8650.tflite` | Original target |
-| Snapdragon 8 Elite (SM8750) | `Qualcomm_SM8750.tflite` | Runtime included; requires device testing |
+Clone your fork or local copy, then run:
 
-The portable `parakeet_tdt_0.6b_v3_5s_i8_stateful.tflite` and
-`parakeet_tdt_0.6b_v3_5s_f32_stateful.tflite` exports automatically use CPU.
-Use the quantized i8 model on Fold 4. CPU processing stays entirely offline;
-it does not call the Mistral API. Chip-specific exports use NPU.
-
-The same APK contains the QNN runtimes for these generations; import the appropriate
-model through the app. Models are not bundled in the APK. SM8450 and SM8475 share
-HTP v69. LiteRT 2.1.6's built-in device allowlist omits both, so the app explicitly
-allows those Qualcomm chips while retaining native QNN model validation. The
-Snapdragon 8 Elite uses a different NPU generation and needs its own export.
-See [LiteRT Qualcomm support](https://developers.google.com/edge/litert/next/qualcomm).
-
-Fold 4 testing (2026-09-09): the SM8450 NPU export loads but returns blank output
-for both a voice-note excerpt and a public speech fixture, taking about 35 seconds
-per 5-second chunk. Its SHA-256 matches the publisher. The portable i8 CPU export
-transcribed the same voice-note excerpt in 0.78 seconds (41 tokens). These timings
-are individual measurements, not guarantees. SM8750 hardware has not been tested.
-The full 127.8-second voice note completed in 13.8 seconds on Fold 4 with app
-0.3.0 (1.05 seconds audio decoding, 12.69 seconds inference, 592 tokens).
-The device test `QualcommNpuSmokeTest` uses the selected local model and skips when
-none is selected.
-
-### 3. (Optional) Add a Mistral API Key
-
-To use the **Mistral Voxtral Mini** transcription backend:
-
-1. Get an API key from [console.mistral.ai](https://console.mistral.ai).
-2. Open the app, tap the **⚙ Settings** icon, and enter your key.
-3. The key is stored encrypted on-device via **Android Keystore** (AES-GCM).
-
-*Note: Mistral transcription requires an internet connection. Local transcription works fully offline.*
-
-### 4. Build the App
 ```bash
 ./gradlew assembleDebug
-```
-
-### 4. Run on Device
-```bash
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
----
+The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
 
-## 📂 Project Structure
+## Set up local transcription
 
+Download a stateful five-second Parakeet TDT 0.6B v3 export from the [LiteRT Community model repository](https://huggingface.co/litert-community/parakeet-tdt-0.6b-v3/tree/main). Copy it to a location that Android's file picker can read.
+
+In the app:
+
+1. Open the settings sheet.
+2. Tap `Import .tflite`.
+3. Select the stateful model file.
+4. Leave that model selected and close settings.
+5. Select an audio file and tap `Transcribe`.
+
+The importer checks the TFLite header and the filename. It enables files whose names identify both Parakeet and a stateful export. Models are referenced through Android's Storage Access Framework and are not copied into the APK.
+
+### Choose a model
+
+| Device or chip | File to use | Current status |
+| --- | --- | --- |
+| Any supported ARM64 device | `parakeet_tdt_0.6b_v3_5s_i8_stateful.tflite` | Portable CPU model. Recommended on Galaxy Z Fold 4. |
+| Any supported ARM64 device | `parakeet_tdt_0.6b_v3_5s_f32_stateful.tflite` | Portable CPU model. Uses more memory than i8. |
+| Snapdragon 8 Gen 1, SM8450 | Filename ending in `Qualcomm_SM8450.tflite` | QNN export. Device testing is still needed. |
+| Snapdragon 8+ Gen 1, SM8475 | SM8450 export targets the same HTP v69 generation | The tested Fold 4 returned blank text. Use portable i8 instead. |
+| Snapdragon 8 Gen 2, SM8550 | Filename ending in `Qualcomm_SM8550.tflite` | QNN export. Device testing is still needed. |
+| Snapdragon 8 Gen 3, SM8650 | Filename ending in `Qualcomm_SM8650.tflite` | Original QNN target. |
+| Snapdragon 8 Elite, SM8750 | Filename ending in `Qualcomm_SM8750.tflite` | Requires its own export. Hardware has not been tested in this project. |
+
+Portable filenames select the CPU backend. Other recognized stateful Parakeet filenames select the QNN backend. The app compares a Qualcomm target in the filename with `Build.SOC_MODEL` and reports a mismatch before use when it can identify one.
+
+The APK includes QNN runtime 2.47.0 and the matching Qualcomm LiteRT dispatch library. QNN 2.48.0 failed when the app closed and reopened a model on the tested Fold 4, so the project remains pinned to 2.47.0. Model creation, inference, and disposal use one worker to prevent disposal during inference.
+
+### Fold 4 measurements
+
+These are single-device measurements from September 9, 2026. They are reference results, not performance claims.
+
+| Test | Result |
+| --- | --- |
+| SM8450 QNN export, five-second speech excerpt | Blank output, about 35 seconds |
+| Portable i8 CPU export, same excerpt | 41 tokens in 0.78 seconds |
+| Portable i8 CPU export, 127.8-second voice note | 592 tokens in 13.8 seconds |
+| Decode portion of the full note | 1.05 seconds |
+| Inference portion of the full note | 12.69 seconds |
+
+The tested SM8450 file matched the publisher's SHA-256 checksum.
+
+## Set up Mistral transcription
+
+1. Create an API key in the [Mistral console](https://console.mistral.ai).
+2. Open the app's settings sheet.
+3. Tap `Add or change Mistral API key` and save the key.
+4. Select `Mistral Voxtral Mini (API)` as the model.
+5. Select an audio file and tap `Transcribe`.
+
+This option requires internet access. It uploads the original audio to `https://api.mistral.ai/v1/audio/transcriptions` and requests `voxtral-mini-latest`. If you select a language, the app sends its language code. Auto-detect omits that field.
+
+The app encrypts the saved key with AES-GCM. The encryption key stays in Android Keystore. Developers may also provide `MISTRAL_API_KEY` in the app process environment; that value takes precedence over the saved key.
+
+## Logs and measurements
+
+Filter Logcat by `VoiceNotesBenchmark` for audio decode and total processing time. Local Parakeet details use the `LiteRtParakeet` tag and include frontend time, encoder time, decoder time, decoder call count, token count, and total inference time.
+
+```bash
+adb logcat -s VoiceNotesBenchmark LiteRtParakeet
 ```
-Transcriber-android-litert/
-├── app/
-│   ├── src/main/
-│   │   ├── java/com/local/voicenotes/
-│   │   │   ├── MainActivity.kt          # UI (Jetpack Compose)
-│   │   │   ├── AppViewModel.kt          # Business logic
-│   │   │   ├── inference/
-│   │   │   │   ├── LiteRtParakeetBackend.kt  # NPU inference engine
-│   │   │   │   ├── ParakeetAssets.kt         # Asset loader
-│   │   │   │   └── ...
-│   │   │   ├── audio/                     # Audio decoding
-│   │   │   ├── domain/                    # Data models
-│   │   │   └── model/                     # Model management
-│   │   ├── assets/parakeet_frontend.bin  # Prepackaged Parakeet assets
-│   │   └── res/                          # UI resources
-│   └── build.gradle.kts                  # App dependencies
-├── build.gradle.kts                      # Project-level Gradle
-├── settings.gradle.kts                   # Project settings
-├── parakeet_tdt_0.6b_v3_5s_f32_stateful_Qualcomm_SM8650.tflite  # Default model
-├── tools/                                # Utility scripts
+
+## Tests
+
+Run the local model-selection tests with:
+
+```bash
+./gradlew testDebugUnitTest
 ```
 
----
+The instrumentation smoke test uses the local model already selected in the installed app. If no local model is selected, JUnit skips the test.
 
-## 🔧 Key Components
+```bash
+./gradlew connectedDebugAndroidTest \
+  -Pandroid.testInstrumentationRunnerArguments.class=com.local.voicenotes.inference.QualcommNpuSmokeTest
+```
 
-| **Component** | **File** | **Description** |
-|--------------|----------|----------------|
-| **UI** | [`MainActivity.kt`](app/src/main/java/com/local/voicenotes/MainActivity.kt) | Jetpack Compose UI with Material 3. |
-| **Business Logic** | [`AppViewModel.kt`](app/src/main/java/com/local/voicenotes/AppViewModel.kt) | Orchestrates transcription workflow. |
-| **Inference Engine** | [`LiteRtParakeetBackend.kt`](app/src/main/java/com/local/voicenotes/inference/LiteRtParakeetBackend.kt) | Handles NPU-accelerated inference via LiteRT + QNN. |
-| **Asset Loader** | [`ParakeetAssets.kt`](app/src/main/java/com/local/voicenotes/inference/ParakeetAssets.kt) | Loads Parakeet frontend assets (vocabulary, mel filterbank). |
-| **Audio Decoding** | [`ParakeetFeatureExtractor.kt`](app/src/main/java/com/local/voicenotes/audio/ParakeetFeatureExtractor.kt) | Extracts audio features (16kHz mono PCM). |
-| **Model Management** | [`ModelRepository.kt`](app/src/main/java/com/local/voicenotes/model/ModelRepository.kt) | Manages imported TFLite models. |
+By default, the smoke test opens and closes the model three times, opens it once more, and runs a silent five-second chunk. This catches QNN lifecycle failures.
 
----
+To transcribe the loudest five-second section of the audio selected in the app, add:
 
-## 📦 Dependencies
+```bash
+-Pandroid.testInstrumentationRunnerArguments.selectedAudio=true
+```
 
-| **Library** | **Version** | **Purpose** |
-|------------|------------|------------|
-| `com.google.ai.edge.litert:litert` | `2.1.6` | LiteRT runtime for NPU acceleration. |
-| `com.qualcomm.qti:qnn-runtime` | `2.47.0` | Qualcomm Neural Network runtime, matched to the bundled dispatch library. |
-| `androidx.compose:compose-bom` | `2024.10.01` | Jetpack Compose UI framework. |
-| `org.jetbrains.kotlinx:kotlinx-coroutines-android` | `1.8.0` | Async transcription support. |
-| `androidx.datastore:datastore-preferences` | `1.1.1` | Persist user preferences. |
+You can provide files that the app process can read:
 
----
+```bash
+-Pandroid.testInstrumentationRunnerArguments.audioPath=/data/local/tmp/test.wav \
+-Pandroid.testInstrumentationRunnerArguments.cpuModelPath=/data/local/tmp/parakeet_tdt_0.6b_v3_5s_i8_stateful.tflite
+```
 
-## 🚀 Usage
+`audioPath` replaces the saved audio selection. `cpuModelPath` tests the supplied portable model without changing the model selected in the app.
 
-1. **Open the App**: Launch the app on a supported Android device.
-2. **Select Audio File**: Choose a voice note (OGG/Opus, MP3, M4A, AAC, or WAV).
-3. **Select Model**: Use the default Parakeet model for offline transcription, or select **Mistral Voxtral Mini (API)** for cloud-based transcription (requires API key).
-4. **Select Language**: Auto-detect or manually select a language.
-5. **Start Transcription**: Tap "Transcribe" to process the audio.
-6. **View Results**: The transcribed text will appear in the UI.
+## Source layout
 
-### Mistral API Transcription
+```text
+app/src/main/java/com/local/voicenotes/
+├── MainActivity.kt                 Compose screen and settings sheet
+├── AppViewModel.kt                 Selection, progress, cancellation, and backend routing
+├── audio/
+│   ├── AndroidAudioDecoder.kt      Android codec decoding and 16 kHz mono conversion
+│   └── ParakeetFeatureExtractor.kt Five-second Parakeet feature extraction
+├── domain/TranscriptionModels.kt   UI and transcription data types
+├── inference/
+│   ├── LiteRtParakeetBackend.kt    CPU and Qualcomm QNN inference
+│   ├── MistralApiKeyStore.kt       Keystore-backed API key storage
+│   ├── MistralTranscriptionBackend.kt
+│   └── ParakeetAssets.kt
+└── model/
+    ├── ModelRepository.kt          Model import and saved selection
+    └── QualcommModels.kt           Portable-model and chip-target rules
+```
 
-1. Obtain an API key from [console.mistral.ai](https://console.mistral.ai).
-2. Open the app → tap the **⚙ Settings** icon → enter your Mistral API key.
-3. In the model dropdown, select **Mistral Voxtral Mini (API)**.
-4. Select your audio file and language, then tap **Transcribe**.
-5. The app sends the original audio file (e.g., MP3, Opus) directly to the Mistral API — no local audio decoding needed.
+`app/src/main/assets/parakeet_frontend.bin` contains the vocabulary and frontend data used by local transcription. Model weights stay outside the repository and APK.
 
-*The Mistral API key is encrypted with AES-GCM via the Android Keystore. The app also supports a `MISTRAL_API_KEY` environment variable as a fallback.*
+## Main dependencies
 
----
+| Dependency | Version | Use |
+| --- | --- | --- |
+| LiteRT | 2.1.6 | TFLite model loading and execution |
+| Qualcomm QNN runtime | 2.47.0 | Snapdragon NPU execution |
+| Jetpack Compose BOM | 2024.10.01 | UI libraries |
+| DataStore Preferences | 1.1.1 | Imported-model metadata and selection |
+| OkHttp | 4.12.0 | Mistral API requests |
 
-## 📊 Benchmarking
+## Contributing
 
-The app logs performance metrics for:
-- Audio decode time
-- Frontend/encoder/decoder latency
-- Total processing time
+Open an issue or send a pull request with a focused change. For QNN fixes, include the phone model, `Build.SOC_MODEL`, model filename, and the relevant Logcat output. Do not commit model weights, API keys, or recordings.
 
-View logs in **Android Studio Logcat** or via `adb logcat`.
+## License and third-party software
 
-### NPU reload regression
+The project uses the MIT License. See [LICENSE](LICENSE).
 
-QNN 2.48.0 reproducibly fails on the Fold 4 when a loaded model is closed and
-reopened in the same app process: DSP teardown errors are followed by
-`Failed to compile model`. QNN is pinned to 2.47.0, matching the bundled dispatch
-library. Native creation, inference and disposal also run on one worker so disposal
-cannot race an active inference call.
-
-`QualcommNpuSmokeTest` exercises three close/reload cycles before inference.
-Its optional instrumentation argument `selectedAudio=true` additionally transcribes
-the highest-energy five-second excerpt of the selected audio locally and requires
-a nonempty result. `audioPath` supplies a test WAV instead; `cpuModelPath` supplies
-an app-readable portable model for comparison without changing the selection.
-
----
-
-## 🔄 Custom Models
-
-To use a custom model:
-1. Download the stateful `.tflite` export matching your phone to the phone.
-2. Import it using the app's model file picker; no source changes are needed.
-3. Select it and wait for NPU initialization. Model notes identify the export target
-   and device; initialization errors include the chip and native failure reason.
-
----
-
-## 🤝 Contributing
-
-Do whatever you want, this repo is not that serious.
-
----
-
-
-## 🙌 Acknowledgments
-
-- **LiteRT**: Google's runtime for on-device ML.
-- **QNN Runtime**: Qualcomm's Neural Network runtime for Snapdragon NPUs.
-- **Parakeet TDT v3**: Open-source speech recognition model.
-- **Jetpack Compose**: Modern Android UI toolkit.
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-### Third-Party Licenses
-- **Qualcomm QNN Runtime**: MIT License (Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.)
-- **LiteRT**: Apache License 2.0
-- **Parakeet TDT Model**: Apache License 2.0
+Qualcomm QNN runtime files retain Qualcomm's MIT notice. LiteRT uses Apache License 2.0. The Parakeet TDT model repository lists its model under Apache License 2.0.
