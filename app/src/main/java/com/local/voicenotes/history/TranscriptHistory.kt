@@ -25,6 +25,10 @@ class TranscriptHistory(
     /** Newest first. Empty until the file has been loaded. */
     val entries: StateFlow<List<HistoryEntry>> = mutableEntries.asStateFlow()
 
+    private val mutablePersistenceError = MutableStateFlow<String?>(null)
+    /** Human-readable save failure; null once the newest snapshot and cleanup are flushed. */
+    val persistenceError: StateFlow<String?> = mutablePersistenceError.asStateFlow()
+
     private val editLock = Any()
     private val pendingEdits = LinkedHashMap<String, String>() // guarded by editLock
     private var scheduledFlush: ScheduledFuture<*>? = null      // guarded by editLock
@@ -64,7 +68,7 @@ class TranscriptHistory(
         }
     }
 
-    /** Writes pending edits now (e.g. when the app goes to the background). */
+    /** Writes pending edits and retries failed persistence, even without new edits. */
     fun flush() = submit { flushEdits() }
 
     fun delete(id: String) = submit {
@@ -84,7 +88,7 @@ class TranscriptHistory(
             scheduledFlush = null
             LinkedHashMap(pendingEdits).also { pendingEdits.clear() }
         }
-        if (edits.isEmpty()) return
+        var writeAttempted = false
         // Edits that give a blank transcription its first text create its entry.
         val remaining = LinkedHashMap<String, String>()
         edits.forEach { (id, text) ->
@@ -92,11 +96,14 @@ class TranscriptHistory(
             if (blank != null && text.isNotBlank()) {
                 blankDrafts.remove(id)
                 store.add(blank.copy(text = text))
+                writeAttempted = true
             } else if (blank == null) {
                 remaining[id] = text
             }
         }
-        if (remaining.isNotEmpty()) store.updateTexts(remaining)
+        if (remaining.isNotEmpty()) writeAttempted = store.updateTexts(remaining) || writeAttempted
+        // Edits have moved into the store's dirty snapshot, not been discarded on I/O failure.
+        if (!writeAttempted) store.flush()
     }
 
     private companion object {
@@ -108,11 +115,14 @@ class TranscriptHistory(
     }
 
     private fun runLogged(block: () -> Unit) {
+        var operationError: String? = null
         try {
             block()
-        } catch (error: Throwable) {
+        } catch (error: Exception) {
+            operationError = "Verlauf konnte nicht aktualisiert werden. Bitte erneut versuchen."
             log("Transcript history operation failed: ${error.message}")
         }
         mutableEntries.value = runCatching { store.entries() }.getOrElse { mutableEntries.value }
+        mutablePersistenceError.value = operationError ?: store.persistenceError
     }
 }

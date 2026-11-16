@@ -2,6 +2,7 @@ package com.local.voicenotes.history
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -74,6 +75,83 @@ class TranscriptHistoryStoreTest {
         assertFalse(store.delete("a"))
         assertEquals(listOf("b"), store.entries().map { it.id })
         assertEquals(listOf("b"), store().entries().map { it.id })
+    }
+
+    @Test fun deletionCannotBeUndoneByBackupRecoveryAndRemovesSensitiveArtifacts() {
+        val store = store()
+        add(store, "keep", 1_000)
+        add(store, "secret", 2_000, "sensitive transcript")
+        File(folder.root, "history.json.corrupt").writeText("broken sensitive transcript")
+        File(folder.root, "history.json.tmp").writeText("sensitive transcript")
+
+        store.delete("secret")
+
+        assertFalse(File(folder.root, "history.json.corrupt").exists())
+        assertFalse(File(folder.root, "history.json.tmp").exists())
+        assertFalse(backup.readText().contains("sensitive transcript"))
+        file.writeText("damaged main")
+        assertEquals(listOf("keep"), store().entries().map { it.id })
+    }
+
+    @Test fun deletingAnIdOnlyInBackupPreservesOtherRecoverableEntries() {
+        val seed = store()
+        add(seed, "backup-only", 1_000)
+        add(seed, "secret", 2_000, "sensitive transcript")
+        backup.writeText(file.readText())
+        // Valid main with a different, independently recoverable older backup.
+        file.writeText("""{"version":1,"entries":[{"id":"current","createdAt":3000,"text":"keep"}]}""")
+        val store = store()
+        File(folder.root, "history.json.corrupt").writeText("broken sensitive transcript")
+        File(folder.root, "history.json.tmp").writeText("sensitive transcript")
+
+        assertFalse(store.delete("secret"))
+
+        assertEquals(listOf("current"), store().entries().map { it.id })
+        assertFalse(backup.readText().contains("sensitive transcript"))
+        assertFalse(File(folder.root, "history.json.corrupt").exists())
+        assertFalse(File(folder.root, "history.json.tmp").exists())
+        file.writeText("damaged main")
+        assertEquals(listOf("backup-only"), store().entries().map { it.id })
+    }
+
+    @Test fun failedBackupSanitizationRemainsAnErrorUntilFlushRetriesCleanup() {
+        val store = store()
+        add(store, "keep", 1_000)
+        add(store, "secret", 2_000)
+        assertTrue(backup.delete())
+        assertTrue(backup.mkdir())
+        File(backup, "blocker").writeText("occupied")
+
+        store.delete("secret")
+        assertEquals(listOf("keep"), store.entries().map { it.id })
+        assertNotNull(store.persistenceError)
+        // Reads must not replace the dirty cache with the stale on-disk version.
+        assertEquals(listOf("keep"), store.entries().map { it.id })
+
+        assertTrue(backup.deleteRecursively())
+        store.flush()
+        assertNull(store.persistenceError)
+        assertEquals(listOf("keep"), store().entries().map { it.id })
+        file.writeText("damaged main")
+        assertEquals(listOf("keep"), store().entries().map { it.id })
+    }
+
+    @Test fun failedCorruptArtifactCleanupIsNotReportedAsSaved() {
+        val store = store()
+        add(store, "keep", 1_000)
+        add(store, "secret", 2_000)
+        val corrupt = File(folder.root, "history.json.corrupt").apply { mkdir() }
+        File(corrupt, "blocker").writeText("sensitive transcript")
+
+        store.delete("secret")
+        assertNotNull(store.persistenceError)
+        assertEquals(listOf("keep"), store.entries().map { it.id })
+
+        assertTrue(corrupt.deleteRecursively())
+        store.flush()
+        assertNull(store.persistenceError)
+        assertFalse(corrupt.exists())
+        assertEquals(listOf("keep"), store().entries().map { it.id })
     }
 
     @Test fun editsUpdateOnlyKnownEntries() {

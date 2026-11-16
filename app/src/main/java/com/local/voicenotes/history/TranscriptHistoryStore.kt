@@ -34,11 +34,13 @@ data class NewHistoryEntry(
  *
  * - Newest entries first; at most [maxEntries] are kept, older ones are dropped on add.
  * - Every change rewrites the file atomically: the JSON goes to a temp file which is synced
- *   and then renamed over the main file. The previous main file is kept as `.bak` first.
+ *   and then renamed over the main file. The previous main file is kept as `.bak` first,
+ *   except deletions: their recovery snapshot excludes deleted ids and `.corrupt` is removed.
  * - A missing or unreadable main file never throws: the store falls back to the backup, else
  *   starts empty. A corrupt main file is moved aside to `.corrupt` so the next write cannot
  *   overwrite the good backup with it.
- * - I/O failures while writing are logged; the in-memory list stays authoritative.
+ * - I/O failures keep the latest in-memory snapshot dirty for [flush]; [persistenceError]
+ *   stays set until both persistence and deletion cleanup succeed.
  *
  * All methods are synchronized; callers should still run them off the main thread.
  */
@@ -57,6 +59,13 @@ class TranscriptHistoryStore(
     private val tempFile = File(file.path + ".tmp")
     private val corruptFile = File(file.path + ".corrupt")
     private var cache: List<HistoryEntry>? = null
+    private val pendingDeletions = mutableSetOf<String>()
+    private var backupFromCurrentSnapshot = false
+    private var dirty = false
+    private var lastPersistenceError: String? = null
+
+    internal val persistenceError: String?
+        @Synchronized get() = lastPersistenceError
 
     @Synchronized
     fun entries(): List<HistoryEntry> = cache ?: load().also { cache = it }
@@ -91,16 +100,32 @@ class TranscriptHistoryStore(
     fun delete(id: String): Boolean {
         val current = entries()
         val updated = current.filter { it.id != id }
-        if (updated.size == current.size) return false
+        // Even an id absent from RAM may still exist in an older recovery file.
+        pendingDeletions += id
+        if (updated.size != current.size) backupFromCurrentSnapshot = true
         commit(updated)
-        return true
+        return updated.size != current.size
     }
 
     private fun commit(updated: List<HistoryEntry>) {
         cache = updated
+        dirty = true
+        flush()
+    }
+
+    /** Retries the newest authoritative snapshot, including any unfinished deletion cleanup. */
+    @Synchronized
+    fun flush() {
+        if (!dirty) return
         try {
-            write(updated)
+            write(checkNotNull(cache))
+            dirty = false
+            pendingDeletions.clear()
+            backupFromCurrentSnapshot = false
+            lastPersistenceError = null
         } catch (error: Exception) {
+            lastPersistenceError = "Verlauf konnte nicht vollständig gespeichert werden. " +
+                "Änderungen sind nur im Arbeitsspeicher; bitte Speicherplatz prüfen und erneut speichern."
             log("Writing transcript history failed: ${error.message}")
             tempFile.delete()
         }
@@ -110,27 +135,47 @@ class TranscriptHistoryStore(
 
     private fun write(entries: List<HistoryEntry>) {
         file.parentFile?.mkdirs()
-        val json = MiniJson.write(
-            mapOf("version" to FORMAT_VERSION, "entries" to entries.map(::toJson))
-        )
-        FileOutputStream(tempFile).use { output ->
+        val json = encode(entries)
+        if (pendingDeletions.isNotEmpty()) {
+            // A visible deletion gets a current recovery snapshot, never the old main file.
+            // For backup-only ids, sanitize the backup without losing its other recoverable ids.
+            val recovery = if (backupFromCurrentSnapshot) entries else {
+                runCatching { parse(backupFile.readText(Charsets.UTF_8)) }.getOrDefault(entries)
+                    .filter { it.id !in pendingDeletions }
+            }
+            // Unreadable raw text cannot be selectively sanitized; do not retain it for inspection.
+            Files.deleteIfExists(corruptFile.toPath())
+            writeSynced(tempFile, encode(recovery))
+            moveAtomically(tempFile, backupFile)
+        }
+        writeSynced(tempFile, json)
+        if (pendingDeletions.isEmpty() && file.exists()) backUp()
+        moveAtomically(tempFile, file)
+        // Makes the rename (and the backup) durable before the commit counts as done.
+        file.parentFile?.let(::syncDirectory)
+    }
+
+    private fun encode(entries: List<HistoryEntry>): String = MiniJson.write(
+        mapOf("version" to FORMAT_VERSION, "entries" to entries.map(::toJson))
+    )
+
+    private fun writeSynced(target: File, json: String) {
+        FileOutputStream(target).use { output ->
             output.write(json.toByteArray(Charsets.UTF_8))
             output.flush()
             output.fd.sync()
         }
-        if (file.exists()) {
-            runCatching { backUp() }.onFailure { log("Backing up transcript history failed: ${it.message}") }
-        }
+    }
+
+    private fun moveAtomically(source: File, target: File) {
         try {
             Files.move(
-                tempFile.toPath(), file.toPath(),
+                source.toPath(), target.toPath(),
                 StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING
             )
         } catch (atomicUnsupported: java.nio.file.AtomicMoveNotSupportedException) {
-            Files.move(tempFile.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING)
+            Files.move(source.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
         }
-        // Makes the rename (and the backup) durable before the commit counts as done.
-        file.parentFile?.let(::syncDirectory)
     }
 
     /** Copies the current main file to `.bak` and syncs it, so the backup survives a crash. */

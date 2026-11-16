@@ -1,14 +1,36 @@
 package com.local.voicenotes.history
 
+import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.File
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.TimeUnit
 
 class TranscriptHistoryTest {
     @get:Rule val folder = TemporaryFolder()
+
+    private val executors = mutableListOf<ScheduledExecutorService>()
+
+    @After fun stopExecutors() {
+        executors.forEach { it.shutdownNow() }
+        executors.forEach { assertTrue(it.awaitTermination(5, TimeUnit.SECONDS)) }
+    }
+
+    private fun history(
+        store: TranscriptHistoryStore = newStore(),
+        editDelayMillis: Long = 60_000
+    ): TranscriptHistory {
+        val executor = Executors.newSingleThreadScheduledExecutor()
+        executors += executor
+        return TranscriptHistory(store, executor = executor, editDelayMillis = editDelayMillis)
+    }
 
     private var now = 1_000L
     private fun newStore() = TranscriptHistoryStore(File(folder.root, "h.json"), clock = { now++ })
@@ -16,7 +38,7 @@ class TranscriptHistoryTest {
     private fun draft(id: String) = NewHistoryEntry(id, "$id.ogg", "Parakeet", "text $id")
 
     @Test fun publishesEntriesNewestFirst() {
-        val history = TranscriptHistory(newStore(), editDelayMillis = 60_000)
+        val history = history()
         history.add(draft("a"))
         history.add(draft("b"))
         history.awaitIdle()
@@ -24,7 +46,7 @@ class TranscriptHistoryTest {
     }
 
     @Test fun editsAreCoalescedAndWrittenOnFlush() {
-        val history = TranscriptHistory(newStore(), editDelayMillis = 60_000)
+        val history = history()
         history.add(draft("a"))
         history.updateText("a", "e")
         history.updateText("a", "ed")
@@ -38,7 +60,7 @@ class TranscriptHistoryTest {
     }
 
     @Test fun editsAreWrittenAfterTheDelay() {
-        val history = TranscriptHistory(newStore(), editDelayMillis = 20)
+        val history = history(editDelayMillis = 20)
         history.add(draft("a"))
         history.updateText("a", "edited")
         val deadline = System.currentTimeMillis() + 5_000
@@ -49,7 +71,7 @@ class TranscriptHistoryTest {
     }
 
     @Test fun deleteDropsPendingEdits() {
-        val history = TranscriptHistory(newStore(), editDelayMillis = 60_000)
+        val history = history()
         history.add(draft("a"))
         history.updateText("a", "edited")
         history.delete("a")
@@ -60,7 +82,7 @@ class TranscriptHistoryTest {
     }
 
     @Test fun blankTranscriptIsListedOnceTheUserEditsTextIntoIt() {
-        val history = TranscriptHistory(newStore(), editDelayMillis = 60_000)
+        val history = history()
         history.add(NewHistoryEntry("blank", "b.ogg", "Parakeet", "", audioDurationMillis = 900))
         history.awaitIdle()
         assertTrue("no speech recognized: not listed", history.entries.value.isEmpty())
@@ -87,7 +109,7 @@ class TranscriptHistoryTest {
     }
 
     @Test fun deletedBlankTranscriptIsNotResurrectedByALateEdit() {
-        val history = TranscriptHistory(newStore(), editDelayMillis = 60_000)
+        val history = history()
         history.add(NewHistoryEntry("blank", "b.ogg", "Parakeet", ""))
         history.delete("blank")
         history.updateText("blank", "text")
@@ -96,18 +118,78 @@ class TranscriptHistoryTest {
         assertTrue(history.entries.value.isEmpty())
     }
 
-    @Test fun commitKeepsASyncedBackupOfThePreviousFile() {
-        val store = newStore()
-        store.add(draft("a"))
-        store.add(draft("b"))
-        val backup = File(folder.root, "h.json.bak")
-        assertTrue(backup.exists())
-        assertEquals(listOf("a"), TranscriptHistoryStore(backup, clock = { 0 }).entries().map { it.id })
+    @Test fun flushRetriesFailedEditsWithoutAnotherEdit() {
+        val history = history()
+        history.add(draft("a"))
+        history.awaitIdle()
+        val blockedTemp = File(folder.root, "h.json.tmp").apply { mkdir() }
+        File(blockedTemp, "blocker").writeText("occupied")
+
+        history.updateText("a", "edited")
+        history.flush()
+        history.awaitIdle()
+        assertEquals("edited", history.entries.value.single().text)
+        assertEquals("text a", newStore().entries().single().text)
+        assertNotNull(history.persistenceError.value)
+        assertTrue(history.persistenceError.value!!.contains("Speicher"))
+
+        assertTrue(blockedTemp.deleteRecursively())
+        history.flush()
+        history.awaitIdle()
+        assertEquals("edited", newStore().entries().single().text)
+        assertNull(history.persistenceError.value)
+    }
+
+    @Test fun flushRetriesAFailedAddAfterStorageBecomesAvailable() {
+        val blocked = folder.newFile("blocked")
+        val file = File(blocked, "history.json")
+        val history = history(TranscriptHistoryStore(file, clock = { now++ }))
+        history.add(draft("a"))
+        history.awaitIdle()
+        assertEquals(listOf("a"), history.entries.value.map { it.id })
+        assertNotNull(history.persistenceError.value)
+
+        assertTrue(blocked.delete())
+        assertTrue(blocked.mkdir())
+        history.flush()
+        history.awaitIdle()
+        assertEquals(listOf("a"), TranscriptHistoryStore(file, clock = { 0 }).entries().map { it.id })
+        assertNull(history.persistenceError.value)
+    }
+
+    @Test fun deleteAfterFailedSaveRetriesOnlyTheNewestSurvivingState() {
+        val history = history()
+        history.add(draft("keep"))
+        history.add(draft("delete"))
+        history.awaitIdle()
+        val blockedTemp = File(folder.root, "h.json.tmp").apply { mkdir() }
+        File(blockedTemp, "blocker").writeText("occupied")
+
+        history.updateText("delete", "superseded secret")
+        history.updateText("keep", "superseded edit")
+        history.flush()
+        history.awaitIdle()
+        assertNotNull(history.persistenceError.value)
+        history.delete("delete")
+        history.updateText("keep", "newest edit")
+        history.flush()
+        history.awaitIdle()
+        assertNotNull(history.persistenceError.value)
+
+        assertTrue(blockedTemp.deleteRecursively())
+        history.flush()
+        history.awaitIdle()
+        val surviving = newStore().entries().single()
+        assertEquals("keep", surviving.id)
+        assertEquals("newest edit", surviving.text)
+        assertNull(history.persistenceError.value)
+        File(folder.root, "h.json").writeText("damaged main")
+        assertEquals(listOf(surviving), newStore().entries())
     }
 
     @Test fun loadsExistingFileOnStart() {
         newStore().add(draft("old"))
-        val history = TranscriptHistory(newStore())
+        val history = history()
         history.awaitIdle()
         assertEquals(listOf("old"), history.entries.value.map { it.id })
     }
