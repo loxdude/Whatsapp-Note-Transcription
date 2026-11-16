@@ -42,6 +42,27 @@ data class AppUiState(
     val canTranscribe: Boolean get() = !busy && audioUri != null && selectedModel?.enabled == true
 }
 
+/** True for models that send audio off the device (e.g. the built-in Mistral API entry). */
+fun ImportedModel.isCloud(): Boolean = isApiModel || backend == "mistral-api"
+
+/**
+ * Chooses the model selection for a (re)loaded [models] list:
+ * 1. keep [current] (the in-memory choice) if it is still listed and enabled;
+ * 2. else restore [saved] (the persisted explicit user choice) if listed and enabled;
+ * 3. else pick the first enabled *local* model.
+ * A cloud model is only ever chosen in steps 1/2, i.e. because the user selected it; it is
+ * never picked automatically, so audio is not uploaded without an explicit choice. Returns null
+ * when no usable local model exists.
+ */
+fun chooseSelection(models: List<ImportedModel>, current: String?, saved: String?): String? {
+    fun usable(id: String?) = id != null && models.any { it.id == id && it.enabled }
+    return when {
+        usable(current) -> current
+        usable(saved) -> saved
+        else -> models.firstOrNull { it.enabled && !it.isCloud() }?.id
+    }
+}
+
 /** Persistent model list and selection. Implemented on Android by ModelRepository. */
 interface ModelCatalog {
     suspend fun models(): List<ImportedModel>
@@ -194,8 +215,7 @@ class TranscriptionCoordinator(
             if (modelsVersion != startVersion) {
                 val state = mutableState.value
                 if (state.selectedModelId == null) {
-                    val fallback = state.models.firstOrNull { it.id == saved && it.enabled }?.id
-                        ?: state.models.firstOrNull { it.enabled }?.id
+                    val fallback = chooseSelection(state.models, current = null, saved = saved)
                     if (fallback != null) write { it.copy(selectedModelId = fallback) }
                 }
                 return
@@ -203,9 +223,7 @@ class TranscriptionCoordinator(
             // A refresh can finish after the user has selected a model. Keep that in-memory
             // choice instead of restoring the older persisted selection over it.
             val current = mutableState.value.selectedModelId
-            val selected = models.firstOrNull { it.id == current && it.enabled }?.id
-                ?: models.firstOrNull { it.id == saved && it.enabled }?.id
-                ?: models.firstOrNull { it.enabled }?.id
+            val selected = chooseSelection(models, current, saved)
             modelsVersion++
             write { it.copy(models = models, selectedModelId = selected) }
             // An import or transcription owns the progress; it will prepare when needed.
@@ -251,10 +269,7 @@ class TranscriptionCoordinator(
                     foregroundKind = null
                 }
                 val current = mutableState.value.selectedModelId
-                val selected = if (entry.enabled) entry.id else {
-                    models.firstOrNull { it.id == current && it.enabled }?.id
-                        ?: models.firstOrNull { it.enabled }?.id
-                }
+                val selected = if (entry.enabled) entry.id else chooseSelection(models, current, saved = null)
                 modelsVersion++
                 write {
                     it.copy(

@@ -33,4 +33,33 @@ class QualcommModelsTest {
         assertNull(QualcommModels.target("parakeet_stateful.tflite"))
         assertTrue(QualcommModels.note("parakeet_stateful.tflite", "SM8475").contains("unknown"))
     }
+
+    @Test fun duplicateDownloadSuffixesStillRouteToCpu() {
+        for (name in listOf(
+            "parakeet_tdt_0.6b_v3_5s_i8_stateful (1).tflite",
+            "parakeet_tdt_0.6b_v3_5s_i8_stateful(2).tflite",
+            "parakeet_tdt_0.6b_v3_5s_i8_stateful-1.tflite",
+            "parakeet_tdt_0.6b_v3_5s_f32_stateful (1) (2).tflite"
+        )) assertEquals(name, "litert-cpu", QualcommModels.backend(name))
+        assertEquals("litert-qnn", QualcommModels.backend("parakeet_tdt_0.6b_v3_5s_i8_stateful_SM8750 (1).tflite"))
+        assertEquals("litert-qnn", QualcommModels.backend("parakeet_tdt_0.6b_v3_5s_i8_stateless (1).tflite"))
+    }
+
+    @Test fun sm8450ExportIsBlockedOnlyOnSm8475() {
+        val export = "parakeet_tdt_0.6b_v3_5s_f32_stateful_Qualcomm_SM8450.tflite"
+        assertTrue(QualcommModels.isBlocked(export, "SM8475"))
+        assertFalse(QualcommModels.isBlocked(export, "SM8450"))
+        assertFalse(QualcommModels.isBlocked("parakeet_tdt_0.6b_v3_5s_i8_stateful.tflite", "SM8475"))
+        assertFalse(QualcommModels.isBlocked("parakeet_stateful_SM8750.tflite", "SM8475"))
+        val evaluation = QualcommModels.evaluate(export, "SM8475")
+        assertFalse(evaluation.enabled)
+        assertTrue(evaluation.note.contains("portable i8"))
+        assertTrue(QualcommModels.evaluate(export, "SM8450").enabled)
+    }
+
+    @Test fun evaluationRejectsNonParakeetAndStatelessExports() {
+        assertFalse(QualcommModels.evaluate("whisper.tflite", "SM8475").enabled)
+        assertFalse(QualcommModels.evaluate("parakeet_tdt_0.6b_v3_5s_i8.tflite", "SM8475").enabled)
+        assertTrue(QualcommModels.evaluate("parakeet_tdt_0.6b_v3_5s_i8_stateful (1).tflite", "SM8475").enabled)
+    }
 }
