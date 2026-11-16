@@ -5,21 +5,24 @@ import android.net.Uri
 import android.os.ParcelFileDescriptor
 import android.os.Build
 import android.os.SystemClock
+import android.provider.DocumentsContract
 import android.util.Log
 import com.local.voicenotes.audio.ParakeetFeatureExtractor
 import com.local.voicenotes.domain.ImportedModel
 import com.local.voicenotes.domain.LanguageOption
 import com.google.ai.edge.litert.CompiledModel
+import com.local.voicenotes.model.ModelFileCache
 import com.google.ai.edge.litert.TensorBuffer
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.asCoroutineDispatcher
 import java.util.concurrent.Executors
 import java.io.File
 import java.io.FileInputStream
-import java.io.FileOutputStream
+import java.io.InputStream
 import java.nio.MappedByteBuffer
 import kotlin.coroutines.coroutineContext
 
@@ -54,9 +57,11 @@ class LiteRtParakeetBackend internal constructor(
     @Volatile private var activeSession: Session? = null
     @Volatile private var preparedModelId: String? = null
     @Volatile private var preparedSession: Session? = null
+    @Volatile private var preparedModelPath: String? = null
     private val sessionLock = Any()
     private val assets by lazy { ParakeetAssets.load(context) }
     private val frontend by lazy { ParakeetFeatureExtractor(assets) }
+    private val modelCache by lazy { ModelFileCache(File(context.noBackupFilesDir, "litert-models")) }
 
     override suspend fun validate(model: ImportedModel): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
@@ -76,7 +81,10 @@ class LiteRtParakeetBackend internal constructor(
         withContext(inferenceDispatcher) {
             runCatching {
                 validate(model).getOrThrow()
-                sessionFor(model)
+                // Preparation (selection, import, app start) re-verifies the source
+                // content, so an edited model is never served from a stale session.
+                val job = coroutineContext[Job]
+                sessionFor(model, verifySource = true) { job?.ensureActive() }
                 Unit
             }
         }
@@ -92,7 +100,11 @@ class LiteRtParakeetBackend internal constructor(
         @Suppress("UNUSED_VARIABLE") val selectedLanguage = language
         cancelled = false
         val totalStarted = SystemClock.elapsedRealtimeNanos()
-        val session = sessionFor(model)
+        val job = coroutineContext[Job]
+        val session = sessionFor(model, verifySource = false) {
+            job?.ensureActive()
+            if (cancelled) throw CancellationException("Transcription cancelled.")
+        }
         Log.i(TAG, "reusePreparedSession=true accelerator=${session.target.label} audioSamples=${pcm16KhzMono.size}")
         activeSession = session
         try {
@@ -196,16 +208,40 @@ class LiteRtParakeetBackend internal constructor(
     private fun elapsedMillis(startedNanos: Long): Long =
         (SystemClock.elapsedRealtimeNanos() - startedNanos) / 1_000_000
 
-    private fun sessionFor(model: ImportedModel): Session = synchronized(sessionLock) {
-        preparedSession?.let { existing ->
-            if (preparedModelId == model.id) return@synchronized existing
-            existing.close()
+    /**
+     * Returns the session for [model]. Without [verifySource] an existing session for the
+     * same model id is reused as-is (per-transcription fast path). With it, the source is
+     * re-hashed and the session is only kept if it was built from the identical bytes.
+     */
+    private fun sessionFor(
+        model: ImportedModel,
+        verifySource: Boolean,
+        checkCancelled: () -> Unit
+    ): Session = synchronized(sessionLock) {
+        val existing = preparedSession
+        if (existing != null && preparedModelId == model.id && !verifySource) return@synchronized existing
+        val modelFileStarted = SystemClock.elapsedRealtimeNanos()
+        val modelFile = try {
+            openModelFile(model, checkCancelled)
+        } catch (error: Throwable) {
+            // Failed or cancelled verification must not leave a possibly stale session
+            // behind for the next transcription to reuse unchecked.
+            existing?.close()
             preparedSession = null
             preparedModelId = null
+            preparedModelPath = null
+            throw error
         }
-        val modelFileStarted = SystemClock.elapsedRealtimeNanos()
-        val modelFile = openModelFile(model)
         val modelFileMillis = elapsedMillis(modelFileStarted)
+        if (existing != null && preparedModelId == model.id && preparedModelPath == modelFile.path) {
+            Log.i(TAG, "verified modelFile=${modelFileMillis}ms; reusing session model=${model.displayName}")
+            modelFile.close() // the existing session keeps its own lease on the same blob
+            return@synchronized existing
+        }
+        existing?.close()
+        preparedSession = null
+        preparedModelId = null
+        preparedModelPath = null
         val sessionStarted = SystemClock.elapsedRealtimeNanos()
         // Decided by the model's backend only. NPU failures are reported as NPU
         // failures; there is deliberately no automatic CPU fallback.
@@ -224,6 +260,7 @@ class LiteRtParakeetBackend internal constructor(
         }
         val sessionMillis = elapsedMillis(sessionStarted)
         preparedModelId = model.id
+        preparedModelPath = modelFile.path
         preparedSession = created
         Log.i(TAG, "prepared accelerator=${target.label} modelFile=${modelFileMillis}ms session=${sessionMillis}ms model=${model.displayName}")
         created
@@ -270,6 +307,7 @@ class LiteRtParakeetBackend internal constructor(
             preparedSession?.close()
             preparedSession = null
             preparedModelId = null
+            preparedModelPath = null
         }
     }
 
@@ -293,39 +331,55 @@ class LiteRtParakeetBackend internal constructor(
         }
     }
 
-    private fun openModelFile(model: ImportedModel): ModelFile {
+    private fun openModelFile(model: ImportedModel, checkCancelled: () -> Unit): ModelFile {
         val uri = Uri.parse(model.path)
         return if (uri.scheme == "content") {
             // CompiledModel's native loader requires a regular filesystem
             // path; unlike Interpreter it cannot consume a SAF descriptor.
-            val directory = File(context.noBackupFilesDir, "litert-models").apply { mkdirs() }
-            val target = File(directory, "${model.id}.tflite")
-            if (!target.isFile || target.length() != model.sizeBytes) {
-                val temporary = File(directory, "${model.id}.partial")
-                if (temporary.exists()) temporary.delete()
-                context.contentResolver.openInputStream(uri)?.use { input ->
-                    FileOutputStream(temporary).use { output ->
-                        input.copyTo(output, 8 * 1024 * 1024)
-                        output.fd.sync()
-                    }
-                } ?: error("The selected model cannot be opened.")
-                require(temporary.length() == model.sizeBytes) {
-                    "The cached model copy is incomplete."
-                }
-                require(temporary.renameTo(target)) { "Could not finalize the local model cache." }
-            }
-            ModelFile(target.absolutePath, null)
+            // The cache is content-addressed: the source is hashed on every call.
+            val lease = modelCache.acquire(SafModelSource(model, uri), checkCancelled)
+            ModelFile(lease.file.absolutePath, null, lease)
         } else {
-            ModelFile(File(model.path).absolutePath, null)
+            ModelFile(File(model.path).absolutePath, null, null)
         }
+    }
+
+    private inner class SafModelSource(model: ImportedModel, private val uri: Uri) : ModelFileCache.Source {
+        override val key: String = model.path
+        override val expectedSize: Long = model.sizeBytes
+
+        override fun open(): InputStream =
+            context.contentResolver.openInputStream(uri) ?: error("The selected model cannot be opened.")
+
+        /** Provider size + last-modified, when exposed; null means no torn-copy hint. */
+        override fun stamp(): String? = runCatching {
+            context.contentResolver.query(
+                uri,
+                arrayOf(DocumentsContract.Document.COLUMN_SIZE, DocumentsContract.Document.COLUMN_LAST_MODIFIED),
+                null, null, null
+            )?.use { cursor ->
+                if (!cursor.moveToFirst()) return@use null
+                val size = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_SIZE)
+                val modified = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
+                if (modified < 0 || cursor.isNull(modified)) return@use null
+                val length = if (size >= 0 && !cursor.isNull(size)) cursor.getLong(size) else -1L
+                "${length}:${cursor.getLong(modified)}"
+            }
+        }.getOrNull()
     }
 
     private data class ModelFile(
         val path: String,
-        val descriptor: ParcelFileDescriptor?
+        val descriptor: ParcelFileDescriptor?,
+        /** Keeps the cached blob from being cleaned up while the session uses it. */
+        val cacheLease: ModelFileCache.Lease?
     ) : AutoCloseable {
         override fun close() {
-            descriptor?.close()
+            try {
+                descriptor?.close()
+            } finally {
+                cacheLease?.close()
+            }
         }
     }
 
