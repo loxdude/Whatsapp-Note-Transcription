@@ -24,7 +24,7 @@ internal fun model(id: String, backend: String = "local", enabled: Boolean = tru
 
 internal val MODEL_A = model("a")
 internal val MODEL_B = model("b")
-internal val MODEL_CLOUD = model("cloud", backend = "cloud")
+internal val MODEL_CLOUD = model("cloud", backend = "cloud").copy(isApiModel = true)
 
 /**
  * Simulates work that cannot be interrupted (a native LiteRT call, blocking I/O): it ignores
