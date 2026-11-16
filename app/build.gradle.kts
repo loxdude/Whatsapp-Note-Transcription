@@ -23,6 +23,9 @@ android {
 
     buildFeatures { compose = true }
 
+    // Bundled .tflite graphs stay uncompressed so LiteRT can map them straight from the APK.
+    androidResources { noCompress += "tflite" }
+
     packaging {
         jniLibs.useLegacyPackaging = true
         resources.excludes += setOf("META-INF/AL2.0", "META-INF/LGPL2.1")

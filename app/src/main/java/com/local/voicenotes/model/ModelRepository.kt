@@ -62,7 +62,10 @@ internal object ModelRecords {
     fun refresh(model: ImportedModel, soc: String): ImportedModel {
         if (!QualcommModels.isLiteRtBackend(model.backend)) return model
         val evaluation = QualcommModels.evaluate(model.displayName, soc)
-        return model.copy(backend = evaluation.backend, enabled = evaluation.enabled, note = evaluation.note)
+        return model.copy(
+            architecture = evaluation.architecture, backend = evaluation.backend,
+            enabled = evaluation.enabled, note = evaluation.note
+        )
     }
 
     /** Catalog shown to the user: built-in cloud entry, then readable imports (usable ones first). */
@@ -132,7 +135,7 @@ class ModelRepository(private val context: Context) {
 
         require(sourceLength > 0) { "The selected model has no readable size." }
         require(displayName.endsWith(".tflite", ignoreCase = true)) {
-            "Choose a .tflite model from the LiteRT Parakeet collection."
+            "Choose a .tflite model from the LiteRT Parakeet or Parakeet Ultra collection."
         }
         val header = resolver.openInputStream(uri)?.use { input ->
             ByteArray(8).also { require(input.read(it) == it.size) { "The model header is truncated." } }
@@ -150,7 +153,7 @@ class ModelRepository(private val context: Context) {
             displayName = displayName,
             path = uri.toString(),
             sizeBytes = sourceLength,
-            architecture = "parakeet-tdt-0.6b-v3",
+            architecture = evaluation.architecture,
             backend = evaluation.backend,
             enabled = evaluation.enabled,
             note = evaluation.note

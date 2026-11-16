@@ -2,6 +2,7 @@ package com.local.voicenotes.model
 
 /** AOT exports target an NPU generation, not the phone's CPU clock speed. */
 internal object QualcommModels {
+    const val V3_ARCHITECTURE = "parakeet-tdt-0.6b-v3"
     private val socPattern = Regex("SM\\d{4}", RegexOption.IGNORE_CASE)
     private val portablePattern = Regex("parakeet_tdt_0\\.6b_v3_5s_(f32|i8)_stateful\\.tflite", RegexOption.IGNORE_CASE)
 
@@ -9,14 +10,23 @@ internal object QualcommModels {
     private val duplicateSuffix = Regex("(?:\\s*\\(\\d+\\)|-\\d+)+(\\.tflite)$", RegexOption.IGNORE_CASE)
 
     /** Result of evaluating a LiteRT model file name against the current device. */
-    data class Evaluation(val backend: String, val enabled: Boolean, val note: String)
+    data class Evaluation(
+        val backend: String,
+        val enabled: Boolean,
+        val note: String,
+        val architecture: String = V3_ARCHITECTURE
+    )
 
     /** Strips duplicate-download suffixes so "x_stateful (1).tflite" is treated as "x_stateful.tflite". */
     fun normalizeName(name: String): String = name.trim().replace(duplicateSuffix, "$1")
 
     fun isPortable(name: String): Boolean = portablePattern.matches(normalizeName(name))
 
-    fun backend(name: String): String = if (isPortable(name)) "litert-cpu" else "litert-qnn"
+    fun backend(name: String): String = when {
+        ParakeetUltraModels.isUltraName(name) -> ParakeetUltraModels.CPU_BACKEND
+        isPortable(name) -> "litert-cpu"
+        else -> "litert-qnn"
+    }
 
     fun target(name: String): String? = socPattern.find(name)?.value?.uppercase()
 
@@ -57,6 +67,7 @@ internal object QualcommModels {
      * device change (e.g. a restored backup).
      */
     fun evaluate(name: String, soc: String): Evaluation {
+        if (ParakeetUltraModels.isUltraName(name)) return ParakeetUltraModels.evaluate(name)
         val lower = normalizeName(name).lowercase()
         val isParakeet = "parakeet" in lower && ("tdt" in lower || "0.6b_v3" in lower)
         val isStateful = "stateful" in lower
@@ -68,5 +79,6 @@ internal object QualcommModels {
         }
     }
 
-    fun isLiteRtBackend(backend: String): Boolean = backend.startsWith("litert-qnn") || backend == "litert-cpu"
+    fun isLiteRtBackend(backend: String): Boolean =
+        backend.startsWith("litert-qnn") || backend == "litert-cpu" || backend == ParakeetUltraModels.CPU_BACKEND
 }

@@ -6,6 +6,9 @@ local.properties
 captures/
 .cxx/
 *.tflite
+# Parakeet Ultra mel front ends and decoder (CC-BY-4.0) are bundled; encoders are imported.
+!app/src/main/assets/parakeet_ultra_mel_*s.tflite
+!app/src/main/assets/parakeet_ultra_decoder_i8.tflite
 .tmp-*
 tools/*.class
 .gitconfig-codex

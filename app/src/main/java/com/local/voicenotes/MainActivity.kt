@@ -195,6 +195,11 @@ private class WhatsAppVoiceNotePicker : ActivityResultContracts.OpenDocument() {
         )
 }
 
+/** CC-BY-4.0 attribution for the bundled Parakeet Ultra graphs. */
+private const val ULTRA_ATTRIBUTION =
+    "Parakeet Ultra mel and decoder graphs are bundled from litert-community/parakeet-ultra " +
+        "(CC-BY-4.0), converted from NVIDIA parakeet-tdt-0.6b-v3 via moondream/parakeet-ultra."
+
 @Composable
 private fun KeepScreenOn(enabled: Boolean) {
     val activity = LocalActivity.current
@@ -282,11 +287,7 @@ private fun TranscriberScreen(state: AppUiState, viewModel: AppViewModel, onWork
                     Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
                         Text("TRANSCRIPTION", style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
-                        val modelSummary = when (state.selectedModel?.backend) {
-                            "mistral-api" -> "Cloud model: Mistral"
-                            null -> "No model selected. Import a model or choose Mistral in settings."
-                            else -> "On-device model: Parakeet"
-                        }
+                        val modelSummary = modelSummary(state.selectedModel)
                         Text(modelSummary, style = MaterialTheme.typography.labelMedium)
                         Text(if (cloudSelected) "Language: ${state.language.label}"
                             else "Language: detected automatically",
@@ -381,6 +382,8 @@ private fun TranscriberScreen(state: AppUiState, viewModel: AppViewModel, onWork
                 }
                 TextButton(onClick = { modelPicker.launch(arrayOf("application/octet-stream", "*/*")) },
                     enabled = !state.busy) { Text("Import .tflite") }
+                Text(ULTRA_ATTRIBUTION, style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
 
                 Text("Language", fontWeight = FontWeight.SemiBold)
                 if (!cloudSelected) {

@@ -21,11 +21,13 @@ internal enum class ExecutionTarget(val label: String) {
 
     companion object {
         const val CPU_BACKEND = "litert-cpu"
+        /** Parakeet Ultra with an i8 encoder: CPU (XNNPACK) only. */
+        const val ULTRA_CPU_BACKEND = "litert-ultra-cpu"
         private const val QUALCOMM_NPU_BACKEND_PREFIX = "litert-qnn"
 
         /** Returns null for backends that are not local LiteRT (e.g. "mistral-api"). */
         fun forBackendOrNull(backend: String): ExecutionTarget? = when {
-            backend == CPU_BACKEND -> CPU
+            backend == CPU_BACKEND || backend == ULTRA_CPU_BACKEND -> CPU
             backend.startsWith(QUALCOMM_NPU_BACKEND_PREFIX) -> QUALCOMM_NPU
             else -> null
         }

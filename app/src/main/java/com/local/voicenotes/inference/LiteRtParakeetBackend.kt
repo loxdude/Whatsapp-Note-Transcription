@@ -12,6 +12,9 @@ import com.local.voicenotes.concurrent.runCatchingCancellable
 import com.local.voicenotes.domain.ImportedModel
 import com.local.voicenotes.domain.LanguageOption
 import com.google.ai.edge.litert.CompiledModel
+import com.google.ai.edge.litert.Environment
+import com.local.voicenotes.model.ParakeetUltraModels
+import com.local.voicenotes.model.QualcommModels
 import com.local.voicenotes.model.BackgroundVerification
 import com.local.voicenotes.model.ModelFileCache
 import com.local.voicenotes.model.VerifiedResultGate
@@ -29,6 +32,7 @@ import java.io.FileInputStream
 import java.io.InputStream
 import java.nio.MappedByteBuffer
 import kotlin.coroutines.coroutineContext
+import kotlin.math.roundToInt
 
 class LiteRtParakeetBackend internal constructor(
     private val context: Context,
@@ -39,13 +43,15 @@ class LiteRtParakeetBackend internal constructor(
 
     companion object {
         private const val TAG = "LiteRtParakeet"
-        private const val BLANK = 8192
-        private const val VOCAB_WITH_BLANK = 8193
-        private const val LOGITS = 8198
+        private const val BLANK = ParakeetV3Decoding.BLANK
+        private const val LOGITS = ParakeetV3Decoding.LOGITS
         private const val ENCODER_FRAMES = 63
         private const val ENCODER_VALUES = 1024 * ENCODER_FRAMES
         private const val STATE_VALUES = 2 * 640
-        private const val MAX_SYMBOLS_PER_FRAME = 10
+        private const val ULTRA_HIDDEN = 640
+        private const val ULTRA_STATE_VALUES = 2 * ULTRA_HIDDEN
+        private const val ULTRA_MEL_BINS = 128
+        private const val SERVING_DEFAULT = "serving_default"
         private val BYTE_TOKEN = Regex("""<0x([0-9A-Fa-f]{2})>""")
         private val WHITESPACE = Regex("""\s+""")
         // Serialize native operations, including close(), so ViewModel disposal
@@ -81,11 +87,22 @@ class LiteRtParakeetBackend internal constructor(
     private val assets by lazy { ParakeetAssets.load(context) }
     private val frontend by lazy { ParakeetFeatureExtractor(assets) }
     private val modelCache by lazy { ModelFileCache(File(context.noBackupFilesDir, "litert-models")) }
+    /** Fallback copies of bundled graphs, only used if LiteRT cannot load them from assets. */
+    private val bundledFiles by lazy { BundledModelFiles(File(context.noBackupFilesDir, "bundled-models")) }
 
     override suspend fun validate(model: ImportedModel): Result<Unit> = withContext(Dispatchers.IO) {
         runCatchingCancellable {
-            require(model.architecture == "parakeet-tdt-0.6b-v3") {
-                "Select the stateful Parakeet TDT 0.6B v3 LiteRT model."
+            when (model.architecture) {
+                QualcommModels.V3_ARCHITECTURE -> Unit
+                ParakeetUltraModels.ARCHITECTURE -> {
+                    val encoder = requireNotNull(ParakeetUltraModels.parseEncoder(model.displayName)) {
+                        "Select a parakeet_ultra_encoder_{10|20|30}s_i8.tflite encoder."
+                    }
+                    require(encoder.isCpu && model.backend == ParakeetUltraModels.CPU_BACKEND) {
+                        ParakeetUltraModels.F16_NOTE
+                    }
+                }
+                else -> throw IllegalArgumentException("Select the stateful Parakeet TDT 0.6B v3 LiteRT model.")
             }
             ExecutionTarget.forBackend(model.backend)
             openModel(model).let { mapped ->
@@ -162,103 +179,116 @@ class LiteRtParakeetBackend internal constructor(
     }
 
     private suspend fun infer(session: Session, pcm16KhzMono: FloatArray, onProgress: (Float) -> Unit): String {
-        val totalStarted = SystemClock.elapsedRealtimeNanos()
         activeSession = session
         try {
-            val emitted = ArrayList<Int>()
-            var predictor: Predictor? = null
-            var frontendNanos = 0L
-            var encoderNanos = 0L
-            var decoderNanos = 0L
-            var decoderCalls = 0
-            val chunkCount = (pcm16KhzMono.size + ParakeetFeatureExtractor.CHUNK_SAMPLES - 1) /
-                ParakeetFeatureExtractor.CHUNK_SAMPLES
-            repeat(chunkCount) { chunk ->
-                checkActive()
-                val frontendStarted = SystemClock.elapsedRealtimeNanos()
-                val features = frontend.extract(
-                    pcm16KhzMono,
-                    chunk * ParakeetFeatureExtractor.CHUNK_SAMPLES
-                )
-                frontendNanos += SystemClock.elapsedRealtimeNanos() - frontendStarted
-                checkActive()
-                val encoderStarted = SystemClock.elapsedRealtimeNanos()
-                val encoder = session.encode(features)
-                encoderNanos += SystemClock.elapsedRealtimeNanos() - encoderStarted
-                val initialDecoderStarted = SystemClock.elapsedRealtimeNanos()
-                predictor = session.bindEncoder(encoder, predictor)
-                decoderNanos += SystemClock.elapsedRealtimeNanos() - initialDecoderStarted
-                decoderCalls++
-                var frame = 0
-                var inner = 0
-                while (frame < ENCODER_FRAMES) {
-                    checkActive()
-                    val logits = predictor!!.logits
-                    val row = frame * LOGITS
-                    var token = 0
-                    var tokenValue = logits[row]
-                    for (id in 1 until VOCAB_WITH_BLANK) {
-                        val value = logits[row + id]
-                        if (value > tokenValue) {
-                            tokenValue = value
-                            token = id
-                        }
-                    }
-                    var duration = 0
-                    var durationValue = logits[row + VOCAB_WITH_BLANK]
-                    for (id in 1 until 5) {
-                        val value = logits[row + VOCAB_WITH_BLANK + id]
-                        if (value > durationValue) {
-                            durationValue = value
-                            duration = id
-                        }
-                    }
-                    if (token == BLANK) {
-                        if (duration > 0) {
-                            frame += duration
-                            inner = 0
-                        } else {
-                            inner++
-                            if (inner >= MAX_SYMBOLS_PER_FRAME) {
-                                frame++
-                                inner = 0
-                            }
-                        }
-                    } else {
-                        emitted += token
-                        val decoderStarted = SystemClock.elapsedRealtimeNanos()
-                        predictor = session.advance(encoder, token, predictor!!)
-                        decoderNanos += SystemClock.elapsedRealtimeNanos() - decoderStarted
-                        decoderCalls++
-                        if (duration > 0) {
-                            frame += duration
-                            inner = 0
-                        } else {
-                            inner++
-                            if (inner >= MAX_SYMBOLS_PER_FRAME) {
-                                frame++
-                                inner = 0
-                            }
-                        }
-                    }
-                }
-                onProgress((chunk + 1f) / chunkCount)
-            }
-            return detokenize(emitted).also {
-                Log.i(
-                    TAG,
-                    "chunks=$chunkCount frontend=${frontendNanos / 1_000_000}ms " +
-                        "encode=${encoderNanos / 1_000_000}ms decode=${decoderNanos / 1_000_000}ms " +
-                        "decodeCalls=$decoderCalls tokens=${emitted.size} inference=${elapsedMillis(totalStarted)}ms"
-                )
+            val job = coroutineContext.job
+            val checkCancelled = { job.ensureActive() }
+            return when (session) {
+                is V3Session -> inferV3(session, pcm16KhzMono, onProgress, checkCancelled)
+                is UltraSession -> inferUltra(session, pcm16KhzMono, onProgress, checkCancelled)
             }
         } finally {
             activeSession = null
         }
     }
 
-    private suspend fun checkActive() {
-        coroutineContext.ensureActive()
+    private fun inferV3(
+        session: V3Session,
+        pcm16KhzMono: FloatArray,
+        onProgress: (Float) -> Unit,
+        checkCancelled: () -> Unit
+    ): String {
+        val totalStarted = SystemClock.elapsedRealtimeNanos()
+        val emitted = ArrayList<Int>()
+        var frontendNanos = 0L
+        var encoderNanos = 0L
+        var decoderNanos = 0L
+        var decoderCalls = 0
+        // Each chunk starts from a fresh predictor (BLANK, zero state): see ParakeetV3Decoding.
+        val stepper = object : ParakeetV3Stepper<FloatArray, Predictor> {
+            override fun fresh(encoder: FloatArray): Predictor = timed { session.start(encoder) }
+            override fun advance(encoder: FloatArray, token: Int, previous: Predictor): Predictor =
+                timed { session.advance(encoder, token, previous) }
+            override fun logits(predictor: Predictor): FloatArray = predictor.logits
+
+            private inline fun timed(block: () -> Predictor): Predictor {
+                val started = SystemClock.elapsedRealtimeNanos()
+                return block().also {
+                    decoderNanos += SystemClock.elapsedRealtimeNanos() - started
+                    decoderCalls++
+                }
+            }
+        }
+        val chunkCount = (pcm16KhzMono.size + ParakeetFeatureExtractor.CHUNK_SAMPLES - 1) /
+            ParakeetFeatureExtractor.CHUNK_SAMPLES
+        repeat(chunkCount) { chunk ->
+            checkCancelled()
+            val frontendStarted = SystemClock.elapsedRealtimeNanos()
+            val features = frontend.extract(pcm16KhzMono, chunk * ParakeetFeatureExtractor.CHUNK_SAMPLES)
+            frontendNanos += SystemClock.elapsedRealtimeNanos() - frontendStarted
+            checkCancelled()
+            val encoderStarted = SystemClock.elapsedRealtimeNanos()
+            val encoder = session.encode(features)
+            encoderNanos += SystemClock.elapsedRealtimeNanos() - encoderStarted
+            emitted += ParakeetV3Decoding.decodeChunk(encoder, ENCODER_FRAMES, stepper, checkCancelled)
+            onProgress((chunk + 1f) / chunkCount)
+        }
+        return detokenize(emitted).also {
+            Log.i(
+                TAG,
+                "chunks=$chunkCount frontend=${frontendNanos / 1_000_000}ms " +
+                    "encode=${encoderNanos / 1_000_000}ms decode=${decoderNanos / 1_000_000}ms " +
+                    "decodeCalls=$decoderCalls tokens=${emitted.size} inference=${elapsedMillis(totalStarted)}ms"
+            )
+        }
+    }
+
+    /**
+     * Parakeet Ultra: overlapping windows (hop = window - 2 s), each through the bundled mel
+     * graph, the imported encoder and the greedy TDT loop from a fresh decoder state; tokens are
+     * kept by the window whose own region contains them (see [UltraWindows]).
+     */
+    private fun inferUltra(
+        session: UltraSession,
+        pcm16KhzMono: FloatArray,
+        onProgress: (Float) -> Unit,
+        checkCancelled: () -> Unit
+    ): String {
+        val totalStarted = SystemClock.elapsedRealtimeNanos()
+        val windows = UltraWindows.plan(pcm16KhzMono.size, session.windowSeconds)
+        var melNanos = 0L
+        var encoderNanos = 0L
+        var decoderNanos = 0L
+        var validFramesTotal = 0
+        val emissions = ArrayList<List<UltraEmission>>(windows.size)
+        windows.forEachIndexed { index, window ->
+            checkCancelled()
+            if (window.lengthSamples < UltraWindows.MIN_WINDOW_SAMPLES) {
+                emissions.add(emptyList())
+            } else {
+                val melStarted = SystemClock.elapsedRealtimeNanos()
+                val mel = session.mel(pcm16KhzMono, window.startSample, window.lengthSamples)
+                melNanos += SystemClock.elapsedRealtimeNanos() - melStarted
+                checkCancelled()
+                val encoderStarted = SystemClock.elapsedRealtimeNanos()
+                val encoded = session.encode(mel)
+                encoderNanos += SystemClock.elapsedRealtimeNanos() - encoderStarted
+                validFramesTotal += mel.validFrames
+                val decoderStarted = SystemClock.elapsedRealtimeNanos()
+                emissions.add(UltraTdt.decode(mel.validFrames, session.network(encoded), checkCancelled))
+                decoderNanos += SystemClock.elapsedRealtimeNanos() - decoderStarted
+            }
+            onProgress((index + 1f) / windows.size)
+        }
+        val tokens = UltraWindows.stitch(windows, emissions)
+        return detokenize(tokens).also {
+            Log.i(
+                TAG,
+                "ultra windows=${windows.size} window=${session.windowSeconds}s mel=${melNanos / 1_000_000}ms " +
+                    "encode=${encoderNanos / 1_000_000}ms decode=${decoderNanos / 1_000_000}ms " +
+                    "frames=$validFramesTotal tokens=${tokens.size} total=${elapsedMillis(totalStarted)}ms"
+            )
+        }
     }
 
     private fun elapsedMillis(startedNanos: Long): Long =
@@ -396,7 +426,14 @@ class LiteRtParakeetBackend internal constructor(
         // failures; there is deliberately no automatic CPU fallback.
         val target = ExecutionTarget.forBackend(model.backend)
         return try {
-            Session(environments, modelFile, target)
+            if (model.architecture == ParakeetUltraModels.ARCHITECTURE) {
+                val encoder = requireNotNull(ParakeetUltraModels.parseEncoder(model.displayName)) {
+                    "Not a Parakeet Ultra encoder: ${model.displayName}"
+                }
+                UltraSession(environments, modelFile, target, encoder.windowSeconds, ::createBundledModel)
+            } else {
+                V3Session(environments, modelFile, target)
+            }
         } catch (error: Throwable) {
             modelFile.close()
             // LinkageError (e.g. UnsatisfiedLinkError from CompiledModel.create) also gets
@@ -594,20 +631,36 @@ class LiteRtParakeetBackend internal constructor(
         }
     }
 
-    private data class Predictor(
-        val label: Int,
-        val inputH: FloatArray,
-        val inputC: FloatArray,
+    /** Predictor state after a `decode_1` step and the logits of every frame of the chunk. */
+    private class Predictor(
         val stateH: FloatArray,
         val stateC: FloatArray,
         val logits: FloatArray
     )
 
-    private class Session(
+    /**
+     * Creates a CPU model from a graph bundled in the APK's assets. LiteRT loads it from the
+     * (uncompressed) asset directly; if that fails, the asset is extracted once to
+     * noBackupFilesDir, verified by size and SHA-256, and loaded by path.
+     */
+    private fun createBundledModel(bundled: BundledModel, options: CompiledModel.Options, environment: Environment): CompiledModel =
+        try {
+            CompiledModel.create(context.assets, bundled.assetName, options, environment)
+        } catch (error: Exception) {
+            if (error is CancellationException) throw error
+            Log.w(TAG, "loading ${bundled.assetName} from assets failed; extracting it", error)
+            val file = bundledFiles.materialize(bundled, { context.assets.open(bundled.assetName) })
+            CompiledModel.create(file.absolutePath, options, environment)
+        }
+
+    /** A loaded model plus its buffers; closed on the inference thread only. */
+    private sealed class Session(val target: ExecutionTarget) : AutoCloseable
+
+    private class V3Session(
         environments: AcceleratorEnvironmentFactory<LiteRtEnvironment>,
         private val modelFile: ModelFile,
-        val target: ExecutionTarget
-    ) : AutoCloseable {
+        target: ExecutionTarget
+    ) : Session(target) {
         private lateinit var environment: LiteRtEnvironment
         private lateinit var model: CompiledModel
         private var encodeInputs: List<TensorBuffer> = emptyList()
@@ -647,12 +700,8 @@ class LiteRtParakeetBackend internal constructor(
             }
         }
 
-        fun bindEncoder(encoder: FloatArray, previous: Predictor?): Predictor =
-            if (previous == null) {
-                step(encoder, BLANK, zeroState(), zeroState())
-            } else {
-                step(encoder, previous.label, previous.inputH, previous.inputC)
-            }
+        /** Fresh predictor for a chunk: BLANK label with zero h/c. */
+        fun start(encoder: FloatArray): Predictor = step(encoder, BLANK, zeroState(), zeroState())
 
         fun advance(encoder: FloatArray, token: Int, previous: Predictor): Predictor =
             step(encoder, token, previous.stateH, previous.stateC)
@@ -675,7 +724,7 @@ class LiteRtParakeetBackend internal constructor(
                 outputH.size == STATE_VALUES && outputC.size == STATE_VALUES) {
                 "Unexpected Parakeet decoder output size."
             }
-            return Predictor(label, inputH, inputC, outputH, outputC, logits)
+            return Predictor(outputH, outputC, logits)
         }
 
         override fun close() {
@@ -690,5 +739,146 @@ class LiteRtParakeetBackend internal constructor(
         }
 
         private fun zeroState(): FloatArray = FloatArray(STATE_VALUES)
+    }
+
+    /** Output of the mel graph for one window. */
+    private class UltraMel(val features: FloatArray, val melMask: FloatArray, val validFrames: Int)
+
+    /** Decoder state: dec_out of the last predict and its h/c outputs. */
+    private class UltraState(val decOut: FloatArray, val h: FloatArray, val c: FloatArray)
+
+    /**
+     * Parakeet Ultra on the CPU: the bundled mel graph of the imported encoder's window size,
+     * the imported encoder (from [modelFile], i.e. the verified private copy) and the bundled
+     * int8 decoder, all in one LiteRT environment. Only this one encoder is loaded.
+     */
+    private class UltraSession(
+        environments: AcceleratorEnvironmentFactory<LiteRtEnvironment>,
+        private val modelFile: ModelFile,
+        target: ExecutionTarget,
+        val windowSeconds: Int,
+        createBundled: (BundledModel, CompiledModel.Options, Environment) -> CompiledModel
+    ) : Session(target) {
+        private val graphSamples = UltraWindows.graphSamples(windowSeconds)
+        private val melFrames = graphSamples / 160
+        private val encoderFrames = melFrames / 8
+        private val models = ArrayList<CompiledModel>()
+        private val buffers = ArrayList<TensorBuffer>()
+        private lateinit var environment: LiteRtEnvironment
+        private val mel: CompiledModel
+        private val encoder: CompiledModel
+        private val decoder: CompiledModel
+        private val melInputs: Map<String, TensorBuffer>
+        private val melOutputs: Map<String, TensorBuffer>
+        private val encoderInputs: Map<String, TensorBuffer>
+        private val encoderOutputs: Map<String, TensorBuffer>
+        private val predictInputs: Map<String, TensorBuffer>
+        private val predictOutputs: Map<String, TensorBuffer>
+        private val jointInputs: Map<String, TensorBuffer>
+        private val jointOutputs: Map<String, TensorBuffer>
+        private val audio = FloatArray(graphSamples)
+        private val frameRow = FloatArray(ULTRA_HIDDEN)
+        private var closed = false
+
+        init {
+            try {
+                environment = environments.create(target)
+                val env = environment.environment
+                val cores = Runtime.getRuntime().availableProcessors()
+                // Threads as in the model card's runner: encoder 4, mel 2, decoder 1.
+                mel = createBundled(ParakeetUltraBundle.mel(windowSeconds), cpuOptions(minOf(2, cores)), env).also { models += it }
+                decoder = createBundled(ParakeetUltraBundle.decoder, cpuOptions(1), env).also { models += it }
+                encoder = CompiledModel.create(modelFile.path, cpuOptions(minOf(4, cores)), env).also { models += it }
+                melInputs = inputs(mel, SERVING_DEFAULT, "audio", "n_valid")
+                melOutputs = outputs(mel, SERVING_DEFAULT, "features", "mel_mask", "frame_mask")
+                encoderInputs = inputs(encoder, SERVING_DEFAULT, "features", "mel_mask")
+                encoderOutputs = outputs(encoder, SERVING_DEFAULT, "enc")
+                predictInputs = inputs(decoder, "predict", "token", "h", "c")
+                predictOutputs = outputs(decoder, "predict", "dec_out", "h_out", "c_out")
+                jointInputs = inputs(decoder, "joint", "enc_frame", "dec_out")
+                jointOutputs = outputs(decoder, "joint", "logits")
+            } catch (error: Throwable) {
+                close()
+                throw error
+            }
+        }
+
+        private fun cpuOptions(threads: Int) = CompiledModel.Options(target.toLiteRtAccelerator()).apply {
+            cpuOptions = CompiledModel.CpuOptions(threads, null, null)
+        }
+
+        private fun inputs(model: CompiledModel, signature: String, vararg names: String) =
+            names.associateWith { name -> model.createInputBuffer(name, signature).also { buffers += it } }
+
+        private fun outputs(model: CompiledModel, signature: String, vararg names: String) =
+            names.associateWith { name -> model.createOutputBuffer(name, signature).also { buffers += it } }
+
+        /** Runs the mel graph on [length] samples from [start], zero-padded to the graph size. */
+        fun mel(pcm: FloatArray, start: Int, length: Int): UltraMel {
+            require(length in 1..graphSamples) { "Parakeet Ultra window does not fit its graph." }
+            audio.fill(0f)
+            System.arraycopy(pcm, start, audio, 0, length)
+            melInputs.getValue("audio").writeFloat(audio)
+            melInputs.getValue("n_valid").writeInt(intArrayOf(length))
+            mel.run(melInputs, melOutputs, SERVING_DEFAULT)
+            val features = melOutputs.getValue("features").readFloat()
+            val melMask = melOutputs.getValue("mel_mask").readFloat()
+            val frameMask = melOutputs.getValue("frame_mask").readFloat()
+            require(features.size == ULTRA_MEL_BINS * melFrames && melMask.size == melFrames &&
+                frameMask.size == encoderFrames) { "Unexpected Parakeet Ultra mel output size." }
+            var valid = 0.0
+            for (value in frameMask) valid += value
+            return UltraMel(features, melMask, valid.roundToInt())
+        }
+
+        /** Encoder output [frames x 640]; rows past the valid frames are undefined. */
+        fun encode(mel: UltraMel): FloatArray {
+            encoderInputs.getValue("features").writeFloat(mel.features)
+            encoderInputs.getValue("mel_mask").writeFloat(mel.melMask)
+            encoder.run(encoderInputs, encoderOutputs, SERVING_DEFAULT)
+            return encoderOutputs.getValue("enc").readFloat().also {
+                require(it.size == encoderFrames * ULTRA_HIDDEN) { "Unexpected Parakeet Ultra encoder output size." }
+            }
+        }
+
+        /** The decoder graph as the greedy loop's network, over one window's encoder output. */
+        fun network(encoded: FloatArray): UltraTdtNetwork<UltraState> = object : UltraTdtNetwork<UltraState> {
+            override fun start(): UltraState =
+                predict(UltraTdt.BLANK, FloatArray(ULTRA_STATE_VALUES), FloatArray(ULTRA_STATE_VALUES))
+
+            override fun predict(token: Int, state: UltraState): UltraState = predict(token, state.h, state.c)
+
+            override fun joint(frame: Int, state: UltraState): FloatArray {
+                require(frame in 0 until encoderFrames) { "Parakeet Ultra frame out of range." }
+                System.arraycopy(encoded, frame * ULTRA_HIDDEN, frameRow, 0, ULTRA_HIDDEN)
+                jointInputs.getValue("enc_frame").writeFloat(frameRow)
+                jointInputs.getValue("dec_out").writeFloat(state.decOut)
+                decoder.run(jointInputs, jointOutputs, "joint")
+                return jointOutputs.getValue("logits").readFloat()
+            }
+        }
+
+        private fun predict(token: Int, h: FloatArray, c: FloatArray): UltraState {
+            predictInputs.getValue("token").writeInt(intArrayOf(token))
+            predictInputs.getValue("h").writeFloat(h)
+            predictInputs.getValue("c").writeFloat(c)
+            decoder.run(predictInputs, predictOutputs, "predict")
+            val decOut = predictOutputs.getValue("dec_out").readFloat()
+            val hOut = predictOutputs.getValue("h_out").readFloat()
+            val cOut = predictOutputs.getValue("c_out").readFloat()
+            require(decOut.size == ULTRA_HIDDEN && hOut.size == ULTRA_STATE_VALUES && cOut.size == ULTRA_STATE_VALUES) {
+                "Unexpected Parakeet Ultra predict output size."
+            }
+            return UltraState(decOut, hOut, cOut)
+        }
+
+        override fun close() {
+            if (closed) return
+            closed = true
+            buffers.forEach { runCatching { it.close() } }
+            models.forEach { runCatching { it.close() } }
+            if (::environment.isInitialized) runCatching { environment.close() }
+            runCatching { modelFile.close() }
+        }
     }
 }

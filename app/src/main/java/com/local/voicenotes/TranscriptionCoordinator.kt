@@ -55,6 +55,14 @@ data class AppUiState(
 /** True for models that send audio off the device (e.g. the built-in Mistral API entry). */
 fun ImportedModel.isCloud(): Boolean = isApiModel || backend == "mistral-api"
 
+/** One-line description of the selected model on the main screen. */
+fun modelSummary(model: ImportedModel?): String = when {
+    model == null -> "No model selected. Import a model or choose Mistral in settings."
+    model.isCloud() -> "Cloud model: Mistral"
+    model.architecture == "parakeet-ultra" -> "On-device model: Parakeet Ultra"
+    else -> "On-device model: Parakeet"
+}
+
 /**
  * Chooses the model selection for a (re)loaded [models] list:
  * 1. keep [current] (the in-memory choice) if it is still listed and enabled;

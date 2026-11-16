@@ -9,6 +9,7 @@ import com.local.voicenotes.domain.ImportedModel
 import com.local.voicenotes.history.NewHistoryEntry
 import com.local.voicenotes.history.TranscriptHistory
 import com.local.voicenotes.history.TranscriptHistoryStore
+import com.local.voicenotes.inference.ExecutionTarget
 import com.local.voicenotes.inference.LiteRtParakeetBackend
 import com.local.voicenotes.inference.MistralApiKeyStore
 import com.local.voicenotes.inference.MistralTranscriptionBackend
@@ -77,6 +78,7 @@ class AppGraph(private val app: VoiceNotesApplication) {
             "litert-qnn" to liteRtBackend,
             "litert-cpu" to liteRtBackend,
             "litert-qnn-sm8650" to liteRtBackend,
+            ExecutionTarget.ULTRA_CPU_BACKEND to liteRtBackend,
             "mistral-api" to mistralBackend
         ),
         log = ::log,
