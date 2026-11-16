@@ -1,14 +1,13 @@
 # Voice Note Transcriber
 
-Voice Note Transcriber is an Android app that turns audio files into editable text. It can run Parakeet Ultra or Parakeet TDT v3 on the phone through LiteRT, or send the original audio file to Mistral's Voxtral Mini API.
+Voice Note Transcriber is an Android app that turns audio files into editable text. It runs Parakeet Ultra on the phone's CPU through LiteRT, or sends the original audio file to Mistral's Voxtral Mini API.
 
-The app does not include an encoder. Import a Parakeet Ultra encoder or a stateful Parakeet TDT v3 `.tflite` export after installation. The small Parakeet Ultra mel front ends and decoder (about 24 MB) are bundled in the APK.
+The app does not include the encoder. Import a Parakeet Ultra encoder `.tflite` after installation. The small Parakeet Ultra mel front ends and decoder (about 24 MB) are bundled in the APK.
 
 ## What it does
 
 - Transcribes OGG and Opus voice notes, MP3, M4A, AAC, and WAV files.
-- Runs Parakeet Ultra (30/20/10 s windows) and portable Parakeet TDT v3 models on the CPU without a network connection.
-- Runs chip-specific Parakeet exports through LiteRT and Qualcomm QNN.
+- Runs Parakeet Ultra (30/20/10 s windows) on the CPU without a network connection.
 - Offers `voxtral-mini-latest` as an online alternative.
 - Supports automatic language detection and 12 named languages: German, English, Spanish, French, Italian, Portuguese, Dutch, Polish, Turkish, Japanese, Korean, and Chinese.
 - Keeps the transcript editable and provides a copy button.
@@ -49,7 +48,7 @@ Imports and transcriptions run in an app-wide coordinator, not in the screen. Wh
 | Gradle plugin | Android Gradle Plugin 8.6.1 |
 | Kotlin | 2.3.0 |
 
-A portable CPU model can run on an ARM64 Android device. QNN acceleration requires a compatible Qualcomm chip and an export built for that NPU generation.
+Parakeet Ultra runs on the CPU of any ARM64 Android device; no NPU or GPU is used.
 
 ## Build and install
 
@@ -64,9 +63,9 @@ The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
 
 ## Set up local transcription
 
-### Parakeet Ultra (recommended)
+### Parakeet Ultra
 
-[Parakeet Ultra](https://huggingface.co/litert-community/parakeet-ultra) runs on the CPU with long windows and is clearly more accurate than the 5 s v3 export on voice notes (see the table below). Download **one** encoder:
+[Parakeet Ultra](https://huggingface.co/litert-community/parakeet-ultra) is the only on-device model. It runs on the CPU with long windows. Download **one** encoder and copy it to a location that Android's file picker can read:
 
 | File | Size | Use |
 | --- | --- | --- |
@@ -74,17 +73,30 @@ The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
 | `parakeet_ultra_encoder_20s_i8.tflite` | 641 MB | In between |
 | `parakeet_ultra_encoder_10s_i8.tflite` | 616 MB | Slower phones and short notes: less padding per window |
 
-Import it like any other model (`Import .tflite`). The window length comes from the filename; browser suffixes such as ` (1)` are accepted. The settings list shows it as `Parakeet Ultra · CPU · 30 s windows`, and the main screen as `On-device model: Parakeet Ultra`. The `f16` encoders are listed but disabled: they are meant for GPU/NPU, which the app does not support for Ultra yet. Do not import the mel or decoder files; the app bundles them.
+In the app:
+
+1. Open the settings sheet.
+2. Tap `Import .tflite` and select the encoder.
+3. Leave it selected and close settings.
+4. Select an audio file and tap `Transcribe`.
+
+The importer checks the filename and the TFLite header; the model is referenced through Android's Storage Access Framework, not copied into the APK. Files that are not part of the Parakeet Ultra family (for example Parakeet TDT v3 or NPU exports) are rejected with an error that names the Ultra encoder to import. The window length comes from the filename; browser suffixes such as ` (1)` are accepted. The settings list shows it as `Parakeet Ultra · CPU · 30 s windows`, and the main screen as `On-device model: Parakeet Ultra`. The `f16` encoders are listed but disabled: they are meant for GPU/NPU, which the app does not support for Ultra yet. Do not import the mel or decoder files; the app bundles them.
 
 How the app runs it (a port of the model card's pipeline):
 
 - Audio up to one window (30 s: 479,840 samples; 20 s: 320,000; 10 s: 160,000) is one zero-padded window. Longer audio is cut into overlapping windows with a hop of window − 2 s (30 s → 28 s, 10 s → 8 s). Each token is kept only by the window whose own region contains its time; the regions meet in the middle of each overlap (the first window keeps from 0, the last up to the end). This avoids the split or repeated words of fixed cuts.
 - Each window: bundled mel graph → imported encoder → greedy TDT decoding with the bundled int8 decoder, starting from blank with zero state (token 3 ends the window, ten symbols per frame at most, 3,750 steps at most).
 - Everything runs on the CPU (XNNPACK): encoder 4 threads, mel 2, decoder 1. Only one encoder is loaded at a time.
-- The encoder goes through the same private copy and verification as v3 models: the first preparation copies it (about 0.6 GB) into app-private storage; later starts reuse the verified copy.
+- The encoder is used from a verified private copy: the first preparation copies it (about 0.6 GB) into app-private storage; later starts reuse the verified copy.
 - The bundled graphs are loaded straight from the APK (stored uncompressed). If LiteRT cannot load an asset, the app extracts it once to `noBackupFilesDir/bundled-models`, checks size and SHA-256, and loads it from there.
 
 Measured on a Galaxy Note10+ (Exynos 9825, `benchmark_model`, 4 threads): one encoder call takes 0.68 s for a 10 s window and 2.28 s for a 30 s window (the v3 5 s encoder: about 0.69 s).
+
+### Why Parakeet TDT v3 and the NPU path were removed
+
+Earlier versions also ran Parakeet TDT 0.6B v3 (stateful 5 s exports) on the CPU and on Qualcomm NPUs through QNN. On the three test phones (OnePlus 12 / SM8650, Galaxy Z Fold 4 / SM8475, Galaxy Note10+ / Exynos 9825) Parakeet Ultra i8 on the CPU was both more accurate (table below) and faster than v3. The only advantage of v3, NPU exports, did not pay off: on the OnePlus 12 the v3 i8 CPU model already beat its own NPU export, and the SM8450 export returned blank text on the Fold 4. Removing v3 and QNN dropped the QNN runtime and the Qualcomm dispatch library and shrank the debug APK from 136.5 MB to 63.1 MB.
+
+Models imported with an older version stay in the model list, disabled, with the note "Parakeet v3 was replaced by Parakeet Ultra — import parakeet_ultra_encoder_30s_i8.tflite (or 10s on slower phones)". If one of them was selected, nothing is selected (the cloud model is never chosen automatically). Their private copies in app storage are released at the next app start.
 
 ### Accuracy on WhatsApp voice notes
 
@@ -92,8 +104,8 @@ Word error rate on 29 real German WhatsApp voice notes (23 minutes), measured wi
 
 | Pipeline | WER |
 | --- | --- |
-| Parakeet TDT v3, 5 s chunks, decoder state carried across chunks (before this fix) | 30.9% |
-| Parakeet TDT v3, 5 s chunks, fresh decoder state per chunk (current) | 18.1% |
+| Parakeet TDT v3, 5 s chunks, decoder state carried across chunks (original) | 30.9% |
+| Parakeet TDT v3, 5 s chunks, fresh decoder state per chunk (last v3 version) | 18.1% |
 | Parakeet Ultra i8, 10 s windows, no overlap | 13.4% |
 | Parakeet Ultra i8, 10 s windows, hop 8 s (app setting) | 12.2% |
 | Parakeet Ultra i8, 30 s windows, no overlap | 10.7% |
@@ -101,51 +113,7 @@ Word error rate on 29 real German WhatsApp voice notes (23 minutes), measured wi
 
 The app uses hop = window − 2 s (28 s for 30 s windows); the 30 s row with overlap was measured with a 25 s hop.
 
-**v3 fix.** The v3 decoder used to carry its predictor state from one 5 s chunk into the next. Every chunk now starts from a fresh predictor (blank label, zero state), which cut the WER from 30.9% to 18.1% at the same cost.
-
-### Parakeet TDT v3
-
-Download a stateful five-second Parakeet TDT 0.6B v3 export from the [LiteRT Community model repository](https://huggingface.co/litert-community/parakeet-tdt-0.6b-v3/tree/main). Copy it to a location that Android's file picker can read.
-
-In the app:
-
-1. Open the settings sheet.
-2. Tap `Import .tflite`.
-3. Select the stateful model file.
-4. Leave that model selected and close settings.
-5. Select an audio file and tap `Transcribe`.
-
-The importer checks the TFLite header and the filename. It enables files whose names identify both Parakeet and a stateful export. Models are referenced through Android's Storage Access Framework and are not copied into the APK.
-
-### Choose a model
-
-| Device or chip | File to use | Current status |
-| --- | --- | --- |
-| Any supported ARM64 device | `parakeet_tdt_0.6b_v3_5s_i8_stateful.tflite` | Portable CPU model. Recommended on Galaxy Z Fold 4. |
-| Any supported ARM64 device | `parakeet_tdt_0.6b_v3_5s_f32_stateful.tflite` | Portable CPU model. Uses more memory than i8. |
-| Snapdragon 8 Gen 1, SM8450 | Filename ending in `Qualcomm_SM8450.tflite` | QNN export. Device testing is still needed. |
-| Snapdragon 8+ Gen 1, SM8475 | SM8450 export targets the same HTP v69 generation | The tested Fold 4 returned blank text. Use portable i8 instead. |
-| Snapdragon 8 Gen 2, SM8550 | Filename ending in `Qualcomm_SM8550.tflite` | QNN export. Device testing is still needed. |
-| Snapdragon 8 Gen 3, SM8650 | Filename ending in `Qualcomm_SM8650.tflite` | Original QNN target. |
-| Snapdragon 8 Elite, SM8750 | Filename ending in `Qualcomm_SM8750.tflite` | Requires its own export. Hardware has not been tested in this project. |
-
-Portable filenames select the CPU backend. Other recognized stateful Parakeet filenames select the QNN backend. The app compares a Qualcomm target in the filename with `Build.SOC_MODEL` and reports a mismatch before use when it can identify one.
-
-The APK includes QNN runtime 2.47.0 and the matching Qualcomm LiteRT dispatch library. QNN 2.48.0 failed when the app closed and reopened a model on the tested Fold 4, so the project remains pinned to 2.47.0. Model creation, inference, and disposal use one worker to prevent disposal during inference.
-
-### Fold 4 measurements
-
-These are single-device measurements from September 9, 2026. They are reference results, not performance claims.
-
-| Test | Result |
-| --- | --- |
-| SM8450 QNN export, five-second speech excerpt | Blank output, about 35 seconds |
-| Portable i8 CPU export, same excerpt | 41 tokens in 0.78 seconds |
-| Portable i8 CPU export, 127.8-second voice note | 592 tokens in 13.8 seconds |
-| Decode portion of the full note | 1.05 seconds |
-| Inference portion of the full note | 12.69 seconds |
-
-The tested SM8450 file matched the publisher's SHA-256 checksum.
+Parakeet TDT v3 rows are kept for reference; v3 is no longer part of the app.
 
 ## Set up Mistral transcription
 
@@ -161,7 +129,7 @@ The app encrypts the saved key with AES-GCM. The encryption key stays in Android
 
 ## Logs and measurements
 
-Filter Logcat by `VoiceNotesBenchmark` for audio decode and total processing time. Local Parakeet details use the `LiteRtParakeet` tag and include frontend time, encoder time, decoder time, decoder call count, token count, and total inference time. Parakeet Ultra logs one line per transcription:
+Filter Logcat by `VoiceNotesBenchmark` for audio decode and total processing time. Local Parakeet Ultra details use the `LiteRtParakeet` tag (session preparation, fast path, verification) and one line per transcription:
 
 ```text
 ultra windows=3 window=30s mel=..ms encode=..ms decode=..ms frames=.. tokens=.. total=..ms
@@ -173,35 +141,13 @@ adb logcat -s VoiceNotesBenchmark LiteRtParakeet
 
 ## Tests
 
-Run the local model-selection tests with:
+Run the JVM unit tests with:
 
 ```bash
 ./gradlew testDebugUnitTest
 ```
 
-The instrumentation smoke test uses the local model already selected in the installed app. If no local model is selected, JUnit skips the test.
-
-```bash
-./gradlew connectedDebugAndroidTest \
-  -Pandroid.testInstrumentationRunnerArguments.class=com.local.voicenotes.inference.QualcommNpuSmokeTest
-```
-
-By default, the smoke test opens and closes the model three times, opens it once more, and runs a silent five-second chunk. This catches QNN lifecycle failures.
-
-To transcribe the loudest five-second section of the audio selected in the app, add:
-
-```bash
--Pandroid.testInstrumentationRunnerArguments.selectedAudio=true
-```
-
-You can provide files that the app process can read:
-
-```bash
--Pandroid.testInstrumentationRunnerArguments.audioPath=/data/local/tmp/test.wav \
--Pandroid.testInstrumentationRunnerArguments.cpuModelPath=/data/local/tmp/parakeet_tdt_0.6b_v3_5s_i8_stateful.tflite
-```
-
-`audioPath` replaces the saved audio selection. `cpuModelPath` tests the supplied portable model without changing the model selected in the app.
+There are no instrumentation tests; the former QNN smoke test was removed with the NPU path.
 
 ## Source layout
 
@@ -216,43 +162,40 @@ app/src/main/java/com/local/voicenotes/
 ├── share/SharedAudio.kt            Auto-transcribe rules for shared audio
 ├── work/                           Foreground service, notifications, cancel receiver
 ├── audio/
-│   ├── AndroidAudioDecoder.kt      Android codec decoding and 16 kHz mono conversion
-│   └── ParakeetFeatureExtractor.kt Five-second Parakeet feature extraction
+│   └── AndroidAudioDecoder.kt      Android codec decoding and 16 kHz mono conversion
 ├── domain/TranscriptionModels.kt   UI and transcription data types
 ├── inference/
-│   ├── LiteRtParakeetBackend.kt    CPU and Qualcomm QNN inference (v3 and Parakeet Ultra sessions)
-│   ├── ParakeetV3Decoding.kt       v3 greedy chunk loop (fresh state per chunk)
+│   ├── LiteRtParakeetBackend.kt    Parakeet Ultra CPU sessions (mel → encoder → decoder)
 │   ├── ParakeetUltraDecoding.kt    Ultra window planning, overlap stitching, greedy TDT loop
 │   ├── BundledModelFiles.kt        Bundled Ultra graphs and verified extraction fallback
 │   ├── MistralApiKeyStore.kt       Keystore-backed API key storage
 │   ├── MistralTranscriptionBackend.kt
-│   └── ParakeetAssets.kt
+│   └── ParakeetVocabulary.kt       Bundled vocabulary and detokenization
 └── model/
-    ├── ModelRepository.kt          Model import and saved selection
-    ├── ParakeetUltraModels.kt      Ultra encoder filename rules
-    └── QualcommModels.kt           Portable-model and chip-target rules
+    ├── ModelRepository.kt          Model import, saved selection, v3 record migration
+    ├── ModelFileCache.kt           Verified private copies of imported encoders
+    └── ParakeetUltraModels.kt      Ultra encoder filename rules
 ```
 
-`app/src/main/assets/parakeet_frontend.bin` contains the vocabulary and frontend data used by local transcription (the Ultra tokenizer's vocabulary is byte-identical). `app/src/main/assets/parakeet_ultra_mel_{10,20,30}s.tflite` and `parakeet_ultra_decoder_i8.tflite` are the bundled Parakeet Ultra graphs. Encoders stay outside the repository and APK.
+`app/src/main/assets/parakeet_vocab.bin` contains the 8192-piece tokenizer vocabulary (identical to the Parakeet TDT v3 vocabulary it was extracted from). `app/src/main/assets/parakeet_ultra_mel_{10,20,30}s.tflite` and `parakeet_ultra_decoder_i8.tflite` are the bundled Parakeet Ultra graphs. Encoders stay outside the repository and APK.
 
 ## Main dependencies
 
 | Dependency | Version | Use |
 | --- | --- | --- |
 | LiteRT | 2.1.6 | TFLite model loading and execution |
-| Qualcomm QNN runtime | 2.47.0 | Snapdragon NPU execution |
 | Jetpack Compose BOM | 2024.10.01 | UI libraries |
 | DataStore Preferences | 1.1.1 | Imported-model metadata and selection |
 | OkHttp | 4.12.0 | Mistral API requests |
 
 ## Contributing
 
-Open an issue or send a pull request with a focused change. For QNN fixes, include the phone model, `Build.SOC_MODEL`, model filename, and the relevant Logcat output. Do not commit model weights, API keys, or recordings.
+Open an issue or send a pull request with a focused change. For model or performance issues, include the phone model, `Build.SOC_MODEL`, the encoder filename, and the relevant Logcat output. Do not commit model weights, API keys, or recordings.
 
 ## License and third-party software
 
 The project uses the MIT License. See [LICENSE](LICENSE).
 
-Qualcomm QNN runtime files retain Qualcomm's MIT notice. LiteRT uses Apache License 2.0. The Parakeet TDT model repository lists its model under Apache License 2.0.
+LiteRT uses Apache License 2.0.
 
 The bundled Parakeet Ultra files (`parakeet_ultra_mel_10s.tflite`, `parakeet_ultra_mel_20s.tflite`, `parakeet_ultra_mel_30s.tflite`, `parakeet_ultra_decoder_i8.tflite`) are unmodified copies from [litert-community/parakeet-ultra](https://huggingface.co/litert-community/parakeet-ultra), licensed under [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/). They are converted from [moondream/parakeet-ultra](https://huggingface.co/moondream/parakeet-ultra), which is based on NVIDIA's [parakeet-tdt-0.6b-v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) (CC-BY-4.0). The settings sheet shows the same attribution.

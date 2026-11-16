@@ -8,6 +8,7 @@ import android.net.Uri
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import android.util.Log
 import java.nio.ByteOrder
 import kotlin.coroutines.coroutineContext
 
@@ -78,8 +79,13 @@ class AndroidAudioDecoder(private val resolver: ContentResolver) {
         var pcmFormat = PcmSampleFormat.PCM_16BIT
         var resampler: StreamingResampler? = null
         val info = MediaCodec.BufferInfo()
+        // Stage timings (logged once per decode) to find where long notes spend their time.
+        var inNs = 0L; var outWaitNs = 0L; var monoNs = 0L; var resampleNs = 0L; var progressNs = 0L
+        var loops = 0; var tryAgain = 0; var buffers = 0
         while (!outputEnded) {
+            loops++
             coroutineContext.ensureActive()
+            val inStart = System.nanoTime()
             if (!inputEnded) {
                 val index = codec.dequeueInputBuffer(TIMEOUT_US)
                 if (index >= 0) {
@@ -94,7 +100,12 @@ class AndroidAudioDecoder(private val resolver: ContentResolver) {
                     }
                 }
             }
-            when (val index = codec.dequeueOutputBuffer(info, TIMEOUT_US)) {
+            val outStart = System.nanoTime()
+            inNs += outStart - inStart
+            val outIndex = codec.dequeueOutputBuffer(info, TIMEOUT_US)
+            outWaitNs += System.nanoTime() - outStart
+            if (outIndex == MediaCodec.INFO_TRY_AGAIN_LATER) tryAgain++
+            when (val index = outIndex) {
                 MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
                     val format = codec.outputFormat
                     sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
@@ -116,16 +127,27 @@ class AndroidAudioDecoder(private val resolver: ContentResolver) {
                         buffer.limit(info.offset + info.size)
                         buffer.order(ByteOrder.nativeOrder())
                         val active = resampler ?: error("Decoder returned PCM before its output format.")
+                        val t0 = System.nanoTime()
                         val mono = PcmDownmix.toMono(buffer, pcmFormat, channels)
+                        val t1 = System.nanoTime()
                         output.append(active.process(mono))
+                        monoNs += t1 - t0; resampleNs += System.nanoTime() - t1; buffers++
                     }
                     outputEnded = info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
+                    val p0 = System.nanoTime()
                     if (durationUs > 0) onProgress((info.presentationTimeUs.toFloat() / durationUs).coerceIn(0f, 1f))
+                    progressNs += System.nanoTime() - p0
                     codec.releaseOutputBuffer(index, false)
                 }
             }
         }
         resampler?.let { output.append(it.flush()) }
+        Log.i(
+            "VoiceNotesBenchmark",
+            "decodeStages loops=$loops buffers=$buffers tryAgain=$tryAgain in=${inNs / 1_000_000}ms " +
+                "outWait=${outWaitNs / 1_000_000}ms mono=${monoNs / 1_000_000}ms resample=${resampleNs / 1_000_000}ms " +
+                "progress=${progressNs / 1_000_000}ms"
+        )
     }
 
     private fun MediaFormat.longOrNull(key: String) = runCatching { getLong(key) }.getOrNull()

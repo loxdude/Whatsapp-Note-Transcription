@@ -59,8 +59,7 @@ fun ImportedModel.isCloud(): Boolean = isApiModel || backend == "mistral-api"
 fun modelSummary(model: ImportedModel?): String = when {
     model == null -> "No model selected. Import a model or choose Mistral in settings."
     model.isCloud() -> "Cloud model: Mistral"
-    model.architecture == "parakeet-ultra" -> "On-device model: Parakeet Ultra"
-    else -> "On-device model: Parakeet"
+    else -> "On-device model: Parakeet Ultra"
 }
 
 /**

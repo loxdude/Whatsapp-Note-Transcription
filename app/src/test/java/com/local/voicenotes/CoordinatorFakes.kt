@@ -107,7 +107,7 @@ internal class Harness(
         scope = scope,
         catalog = catalog,
         decoder = PcmDecoder { source, progress -> onDecode(source, progress) },
-        // The same backend under two keys mirrors the LiteRT CPU/QNN aliases in AppViewModel.
+        // The same backend under two keys: one backend may serve several backend ids.
         backends = mapOf("local" to local, "local-alias" to local, "cloud" to cloud),
         monotonicMillis = { now.get() },
         clockInterval = 5.milliseconds,

@@ -252,6 +252,43 @@ class ModelFileCacheTest {
 
     private class Cancelled : RuntimeException()
 
+    @Test fun forgetDropsReplacedSourcesAndCollectsTheirBlobsOnceUnleased() {
+        val replaced = FakeSource("content://models/v3", modelBytes(7)).apply { stamp = { "1:1" } }
+        val kept = FakeSource("content://models/ultra", modelBytes(8))
+        val replacedLease = cache.acquire(replaced)
+        val keptFile = acquire(kept)
+        assertEquals(2, blobs().size)
+        assertEquals(1, File(root, "records").listFiles().orEmpty().size)
+
+        // Refs and records go at once; a blob still leased by a live session survives.
+        cache.forget(listOf(replaced.key))
+        assertEquals(1, File(root, "refs").listFiles().orEmpty().size)
+        assertTrue(File(root, "records").listFiles().orEmpty().isEmpty())
+        assertTrue(replacedLease.file.exists())
+
+        replacedLease.close()
+        cache.forget(listOf(replaced.key)) // idempotent; the GC now collects the blob
+        assertFalse(replacedLease.file.exists())
+        assertEquals(listOf(keptFile.name), blobs().map { it.name })
+        assertArrayEquals(kept.content, acquire(kept).readBytes())
+    }
+
+    @Test fun replacedBlobIsAlsoCollectedByTheNextAcquireOfAnotherSource() {
+        val replaced = FakeSource("content://models/v3", modelBytes(9))
+        val replacedFile = acquire(replaced)
+        leases.forEach { it.close() }
+        leases.clear()
+        cache.forget(listOf(replaced.key))
+        assertFalse(replacedFile.exists())
+        assertTrue(blobs().isEmpty())
+    }
+
+    @Test fun forgetOnMissingCacheIsANoOp() {
+        cache.forget(listOf("content://models/v3"))
+        cache.forget(emptyList())
+        assertFalse(root.exists())
+    }
+
     private inline fun <reified T : Throwable> expect(block: () -> Unit) {
         try {
             block()

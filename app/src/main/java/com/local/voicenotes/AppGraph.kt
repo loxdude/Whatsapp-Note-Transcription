@@ -9,11 +9,11 @@ import com.local.voicenotes.domain.ImportedModel
 import com.local.voicenotes.history.NewHistoryEntry
 import com.local.voicenotes.history.TranscriptHistory
 import com.local.voicenotes.history.TranscriptHistoryStore
-import com.local.voicenotes.inference.ExecutionTarget
 import com.local.voicenotes.inference.LiteRtParakeetBackend
 import com.local.voicenotes.inference.MistralApiKeyStore
 import com.local.voicenotes.inference.MistralTranscriptionBackend
 import com.local.voicenotes.model.ModelRepository
+import com.local.voicenotes.model.ParakeetUltraModels
 import com.local.voicenotes.work.TranscriptionService
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
@@ -75,10 +75,7 @@ class AppGraph(private val app: VoiceNotesApplication) {
         },
         decoder = PcmDecoder { source, onProgress -> decoder.decode(Uri.parse(source), onProgress) },
         backends = mapOf(
-            "litert-qnn" to liteRtBackend,
-            "litert-cpu" to liteRtBackend,
-            "litert-qnn-sm8650" to liteRtBackend,
-            ExecutionTarget.ULTRA_CPU_BACKEND to liteRtBackend,
+            ParakeetUltraModels.CPU_BACKEND to liteRtBackend,
             "mistral-api" to mistralBackend
         ),
         log = ::log,
@@ -112,6 +109,23 @@ class AppGraph(private val app: VoiceNotesApplication) {
             runCatching { setAudio(Uri.parse(saved), persist = false) }
         }
         initialRefresh = coordinator.refreshModels()
+        releaseReplacedModelCopies()
+    }
+
+    /**
+     * Parakeet v3 records stay listed (disabled), but their private copies in the model cache
+     * are never loaded again: drop their cache refs so the cache GC deletes the blobs.
+     */
+    private fun releaseReplacedModelCopies() {
+        scope.launch(Dispatchers.IO) {
+            runCatching {
+                val paths = repository.replacedModelPaths()
+                if (paths.isNotEmpty()) {
+                    liteRtBackend.forgetCachedCopies(paths)
+                    log("Released cached copies of ${paths.size} replaced Parakeet v3 model(s).")
+                }
+            }.onFailure { log("Releasing replaced model copies failed: ${it.message}") }
+        }
     }
 
     /**

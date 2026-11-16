@@ -3,7 +3,6 @@ package com.local.voicenotes.model
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import android.os.Build
 import android.provider.OpenableColumns
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -56,12 +55,16 @@ internal object ModelRecords {
         } + added
 
     /**
-     * Applies device-dependent rules to a stored record. LiteRT records are re-evaluated against
-     * the current [soc] on every read instead of trusting the persisted `enabled` flag.
+     * Re-evaluates a stored record on every read instead of trusting the persisted `enabled`
+     * flag. Records of the removed Parakeet TDT v3 path (portable CPU or Qualcomm NPU exports)
+     * stay listed but disabled, pointing the user to Parakeet Ultra.
      */
-    fun refresh(model: ImportedModel, soc: String): ImportedModel {
-        if (!QualcommModels.isLiteRtBackend(model.backend)) return model
-        val evaluation = QualcommModels.evaluate(model.displayName, soc)
+    fun refresh(model: ImportedModel): ImportedModel {
+        if (ParakeetUltraModels.isReplacedV3(model)) {
+            return model.copy(enabled = false, note = ParakeetUltraModels.V3_REPLACED_NOTE)
+        }
+        if (!ParakeetUltraModels.isLocalBackend(model.backend)) return model
+        val evaluation = ParakeetUltraModels.evaluate(model.displayName)
         return model.copy(
             architecture = evaluation.architecture, backend = evaluation.backend,
             enabled = evaluation.enabled, note = evaluation.note
@@ -69,8 +72,8 @@ internal object ModelRecords {
     }
 
     /** Catalog shown to the user: built-in cloud entry, then readable imports (usable ones first). */
-    fun catalog(stored: List<ImportedModel>, soc: String, isReadable: (ImportedModel) -> Boolean): List<ImportedModel> {
-        val imported = stored.filter(isReadable).map { refresh(it, soc) }.sortedByDescending { it.enabled }
+    fun catalog(stored: List<ImportedModel>, isReadable: (ImportedModel) -> Boolean): List<ImportedModel> {
+        val imported = stored.filter(isReadable).map(::refresh).sortedByDescending { it.enabled }
         return (listOf(builtInMistral) + imported).distinctBy { it.id }
     }
 
@@ -100,7 +103,18 @@ class ModelRepository(private val context: Context) {
     suspend fun models(): List<ImportedModel> = withContext(Dispatchers.IO) {
         val raw = context.modelDataStore.data.first()[modelsKey].orEmpty()
         val stored = ModelRecords.decodeEach(rawRecords(raw), ::decodeRecord)
-        ModelRecords.catalog(stored, Build.SOC_MODEL, ::isReadable)
+        ModelRecords.catalog(stored, ::isReadable)
+    }
+
+    /**
+     * Source paths of stored Parakeet v3 records, readable or not. Their private copies in the
+     * model cache are no longer used by any session and can be released.
+     */
+    suspend fun replacedModelPaths(): List<String> = withContext(Dispatchers.IO) {
+        val raw = context.modelDataStore.data.first()[modelsKey].orEmpty()
+        ModelRecords.decodeEach(rawRecords(raw), ::decodeRecord)
+            .filter(ParakeetUltraModels::isReplacedV3)
+            .map { it.path }
     }
 
     suspend fun selectedModelId(): String? = withContext(Dispatchers.IO) {
@@ -116,7 +130,6 @@ class ModelRepository(private val context: Context) {
      * whether the result still applies (the import may have been cancelled or superseded).
      */
     suspend fun import(uri: Uri, onProgress: (Float) -> Unit): ImportedModel = withContext(Dispatchers.IO) {
-        context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
         val resolver = context.contentResolver
         val metadata = resolver.query(
             uri,
@@ -135,16 +148,19 @@ class ModelRepository(private val context: Context) {
 
         require(sourceLength > 0) { "The selected model has no readable size." }
         require(displayName.endsWith(".tflite", ignoreCase = true)) {
-            "Choose a .tflite model from the LiteRT Parakeet or Parakeet Ultra collection."
+            "Choose a Parakeet Ultra encoder (parakeet_ultra_encoder_30s_i8.tflite)."
         }
+        // Rejected before the grant is persisted, so a refused file leaves nothing behind.
+        ParakeetUltraModels.importError(displayName)?.let { throw IllegalArgumentException(it) }
         val header = resolver.openInputStream(uri)?.use { input ->
             ByteArray(8).also { require(input.read(it) == it.size) { "The model header is truncated." } }
         } ?: error("Cannot read the selected model.")
         require(header.copyOfRange(4, 8).contentEquals("TFL3".encodeToByteArray())) {
             "This is not a valid LiteRT/TFLite flatbuffer."
         }
+        resolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
 
-        val evaluation = QualcommModels.evaluate(displayName, Build.SOC_MODEL)
+        val evaluation = ParakeetUltraModels.evaluate(displayName)
         val hash = MessageDigest.getInstance("SHA-256")
             .digest("${uri}|$sourceLength".encodeToByteArray())
             .joinToString("") { "%02x".format(it) }

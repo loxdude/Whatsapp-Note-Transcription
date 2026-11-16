@@ -11,7 +11,7 @@ import org.junit.Test
 
 class SharedAudioTest {
     private val uri = "content://com.whatsapp.provider.media/item/1"
-    private val local = ImportedModel("local", "Parakeet", "content://m", 1, "parakeet", "litert-cpu", enabled = true)
+    private val local = ImportedModel("local", "Parakeet", "content://m", 1, "parakeet-ultra", "litert-ultra-cpu", enabled = true)
     private val disabled = local.copy(id = "off", enabled = false)
     private val cloud = ImportedModel("mistral", "Mistral", "", 0, "voxtral", "mistral-api", enabled = true, isApiModel = true)
 

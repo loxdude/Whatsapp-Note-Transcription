@@ -130,9 +130,9 @@ class TranscriptionCoordinatorTest {
 
     @Test fun ordinaryErrorsAreStillReportedAsFailures() = coordinatorTest { h ->
         h.ready()
-        h.local.onTranscribe = { _, _ -> throw IllegalStateException("NPU exploded") }
+        h.local.onTranscribe = { _, _ -> throw IllegalStateException("inference exploded") }
         h.coordinator.transcribe()
-        assertEquals(TranscriptionProgress.Failed("NPU exploded"), h.await { !it.busy }.progress)
+        assertEquals(TranscriptionProgress.Failed("inference exploded"), h.await { !it.busy }.progress)
 
         h.onDecode = { _, _ -> FloatArray(0) }
         h.coordinator.transcribe()
@@ -274,10 +274,10 @@ class TranscriptionCoordinatorTest {
     }
 
     @Test fun preparationFailureAndCancellationAreDistinguished() = coordinatorTest { h ->
-        h.local.onPrepare = { Result.failure(IllegalStateException("NPU preparation failed")) }
+        h.local.onPrepare = { Result.failure(IllegalStateException("CPU preparation failed")) }
         h.catalog.saved = MODEL_A.id
         h.coordinator.refreshModels().join()
-        assertEquals(TranscriptionProgress.Failed("NPU preparation failed"), h.await { !it.busy }.progress)
+        assertEquals(TranscriptionProgress.Failed("CPU preparation failed"), h.await { !it.busy }.progress)
 
         // A backend that wraps cancellation in a Result must not produce a failure message.
         h.local.onPrepare = { Result.failure(CancellationException("prepare cancelled")) }

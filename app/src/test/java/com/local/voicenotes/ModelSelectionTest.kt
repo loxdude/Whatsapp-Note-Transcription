@@ -78,6 +78,45 @@ class ModelSelectionTest {
         assertNull(state.selectedModelId)
     }
 
+    @Test fun savedV3SelectionAfterUpgradeSelectsNothingAndShowsTheNoModelHint() {
+        val v3 = ImportedModel(
+            "v3", "parakeet_tdt_0.6b_v3_5s_i8_stateful.tflite", "content://models/v3", 1L,
+            "parakeet-tdt-0.6b-v3", "litert-cpu", enabled = true
+        )
+        val listed = com.local.voicenotes.model.ModelRecords.refresh(v3)
+        withCoordinator(listOf(MODEL_CLOUD, listed)) { h ->
+            h.catalog.saved = v3.id
+            h.coordinator.refreshModels().join()
+            settle()
+            assertNull(h.state.selectedModelId)
+            assertEquals(listOf(MODEL_CLOUD.id, v3.id), h.state.models.map { it.id })
+            assertFalse(h.state.models.first { it.id == v3.id }.enabled)
+            assertTrue(modelSummary(h.state.selectedModel).startsWith("No model selected"))
+            h.coordinator.setAudio("file:///voice.ogg", "voice.ogg")
+            assertFalse(h.state.canTranscribe)
+            assertFalse(h.coordinator.selectModel(v3.id))
+            assertTrue(h.cloud.prepared.isEmpty())
+            assertTrue(h.local.prepared.isEmpty())
+        }
+    }
+
+    @Test fun importingAV3ModelFailsWithThePointerToUltraAndKeepsTheSelection() = withCoordinator(listOf(MODEL_CLOUD, MODEL_A)) { h ->
+        h.coordinator.refreshModels().join()
+        h.await { !it.busy }
+        val name = "parakeet_tdt_0.6b_v3_5s_i8_stateful.tflite"
+        // ModelRepository.import throws this before persisting anything.
+        h.catalog.onImport = { _, _ ->
+            throw IllegalArgumentException(com.local.voicenotes.model.ParakeetUltraModels.importError(name))
+        }
+        assertTrue(h.coordinator.importModel("content://models/v3"))
+        val state = h.await { !it.busy }
+        val failed = state.progress as TranscriptionProgress.Failed
+        assertTrue(failed.message, failed.message.contains("parakeet_ultra_encoder_30s_i8.tflite"))
+        assertTrue(failed.message, failed.message.contains("no longer supported"))
+        assertEquals(MODEL_A.id, state.selectedModelId)
+        assertEquals(listOf(MODEL_CLOUD.id, MODEL_A.id), state.models.map { it.id })
+    }
+
     private fun withCoordinator(models: List<ImportedModel>, block: suspend (Harness) -> Unit) = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + coroutineContext[kotlin.coroutines.ContinuationInterceptor]!!)
         try {

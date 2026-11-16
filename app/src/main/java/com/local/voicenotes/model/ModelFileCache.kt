@@ -122,6 +122,24 @@ class ModelFileCache(
         }
     }
 
+    /**
+     * Drops the ref, record and fast-path marker of each source key in [keys] (sources that
+     * will never be resolved again, e.g. models of a removed architecture) and deletes the
+     * blobs that are then unreferenced and not leased. Idempotent; a missing cache is a no-op.
+     */
+    fun forget(keys: Collection<String>, checkCancelled: () -> Unit = {}) {
+        if (keys.isEmpty() || !root.isDirectory) return
+        withDirectoryLock(checkCancelled) {
+            for (key in keys) {
+                val name = sha256Hex(key.encodeToByteArray())
+                File(refs, name).delete()
+                File(records, name).delete()
+                File(fastPathMarkers, name).delete()
+            }
+            runCatching { collectUnreferencedBlobs() }
+        }
+    }
+
     private fun resolveLocked(source: Source, checkCancelled: () -> Unit, trustedBlobPath: String?): File {
         purgeIncompleteAndLegacy()
         val keyName = keyName(source)
