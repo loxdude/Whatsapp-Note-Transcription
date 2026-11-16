@@ -83,10 +83,13 @@ internal class ApiKeyRepository(
 
         /** Set when a stored key turned out undecryptable; cleared by the next [set]. */
         const val UNREADABLE_FLAG = "mistral_api_key_unreadable"
+
+        // All stores use the same preference entries and Keystore alias. Protect the
+        // whole read/migrate/reset/write transaction, not just one repository instance.
+        private val processLock = Any()
     }
 
-    @Synchronized
-    fun read(): MistralApiKeyResult {
+    fun read(): MistralApiKeyResult = synchronized(processLock) {
         val encrypted = prefs.getString(ENCRYPTED_KEY)
         val iv = prefs.getString(IV_KEY)
         if (encrypted != null || iv != null) {
@@ -115,23 +118,25 @@ internal class ApiKeyRepository(
      * Status without decrypting. A stored key that has not been read yet reports
      * CONFIGURED; once a read finds it undecryptable it reports UNREADABLE until [set].
      */
-    @Synchronized
-    fun status(): MistralApiKeyStatus = when {
-        prefs.getString(ENCRYPTED_KEY) != null || !prefs.getString(LEGACY_KEY).isNullOrBlank() ->
-            MistralApiKeyStatus.CONFIGURED
-        prefs.getString(UNREADABLE_FLAG) != null -> MistralApiKeyStatus.UNREADABLE
-        else -> MistralApiKeyStatus.ABSENT
+    fun status(): MistralApiKeyStatus = synchronized(processLock) {
+        when {
+            prefs.getString(ENCRYPTED_KEY) != null || !prefs.getString(LEGACY_KEY).isNullOrBlank() ->
+                MistralApiKeyStatus.CONFIGURED
+            prefs.getString(UNREADABLE_FLAG) != null -> MistralApiKeyStatus.UNREADABLE
+            else -> MistralApiKeyStatus.ABSENT
+        }
     }
 
     /** Stores [value] encrypted; blank clears the key. Cipher/storage errors are returned. */
-    @Synchronized
-    fun set(value: String): Result<Unit> = runCatchingCancellable {
-        val key = value.trim()
-        if (key.isEmpty()) {
-            prefs.edit(mapOf(LEGACY_KEY to null, ENCRYPTED_KEY to null, IV_KEY to null, UNREADABLE_FLAG to null))
-        } else {
-            val (encrypted, iv) = cipher.encrypt(key)
-            prefs.edit(mapOf(ENCRYPTED_KEY to encrypted, IV_KEY to iv, LEGACY_KEY to null, UNREADABLE_FLAG to null))
+    fun set(value: String): Result<Unit> = synchronized(processLock) {
+        runCatchingCancellable {
+            val key = value.trim()
+            if (key.isEmpty()) {
+                prefs.edit(mapOf(LEGACY_KEY to null, ENCRYPTED_KEY to null, IV_KEY to null, UNREADABLE_FLAG to null))
+            } else {
+                val (encrypted, iv) = cipher.encrypt(key)
+                prefs.edit(mapOf(ENCRYPTED_KEY to encrypted, IV_KEY to iv, LEGACY_KEY to null, UNREADABLE_FLAG to null))
+            }
         }
     }
 

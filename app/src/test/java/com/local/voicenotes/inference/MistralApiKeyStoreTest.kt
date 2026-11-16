@@ -39,6 +39,13 @@ class MistralApiKeyStoreTest {
     private val repo = ApiKeyRepository(prefs, cipher)
     private val store = MistralApiKeyStore(repo)
 
+    @Test fun backendConstructorAcceptsGraphsSharedStore() {
+        assertTrue("backend must accept a Context and the graph's shared MistralApiKeyStore",
+            MistralTranscriptionBackend::class.java.constructors.any {
+                it.parameterTypes.contentEquals(arrayOf(android.content.Context::class.java, MistralApiKeyStore::class.java))
+            })
+    }
+
     @Test fun absentWhenNothingStored() {
         assertEquals(MistralApiKeyResult.Absent, repo.read())
         assertEquals(MistralApiKeyStatus.ABSENT, repo.status())
@@ -134,6 +141,82 @@ class MistralApiKeyStoreTest {
         var reads = 0
         resolveMistralApiKey("env", true) { reads++; MistralApiKeyResult.Absent }
         assertEquals(0, reads)
+    }
+
+    @Test fun twoStoresCannotReadMixedCiphertextAndIvOrEraseNewKey() {
+        assertTwoStoreIsolation(pauseDuringDecrypt = false)
+    }
+
+    @Test fun unreadableResetCannotRaceWithAnotherStoresNewKey() {
+        assertTwoStoreIsolation(pauseDuringDecrypt = true)
+    }
+
+    private fun assertTwoStoreIsolation(pauseDuringDecrypt: Boolean) {
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val writerStarted = java.util.concurrent.CountDownLatch(1)
+        val writerDone = java.util.concurrent.CountDownLatch(1)
+        val armed = java.util.concurrent.atomic.AtomicBoolean(false)
+        val values = java.util.concurrent.ConcurrentHashMap<String, String>()
+        val resets = java.util.concurrent.atomic.AtomicInteger()
+        fun pause() {
+            if (armed.compareAndSet(true, false)) {
+                entered.countDown()
+                check(release.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            }
+        }
+        val sharedPrefs = object : ApiKeyPreferences {
+            override fun getString(key: String): String? {
+                val value = synchronized(this) { values[key] }
+                if (!pauseDuringDecrypt && key == ApiKeyRepository.ENCRYPTED_KEY) pause()
+                return value
+            }
+            @Synchronized override fun edit(changes: Map<String, String?>) {
+                changes.forEach { (k, v) -> if (v == null) values.remove(k) else values[k] = v }
+            }
+        }
+        val sharedCipher = object : ApiKeyCipher {
+            override fun encrypt(plainText: String) = "cipher-$plainText" to "iv-$plainText"
+            override fun decrypt(cipherText: String, iv: String): String {
+                if (pauseDuringDecrypt) pause()
+                val plain = cipherText.removePrefix("cipher-")
+                check(iv == "iv-$plain" && !(pauseDuringDecrypt && plain == "old-synthetic")) {
+                    "synthetic tag mismatch"
+                }
+                return plain
+            }
+            override fun reset() { resets.incrementAndGet() }
+        }
+        // Separate repositories, as constructed by two Context-based store clients today.
+        val reader = MistralApiKeyStore(ApiKeyRepository(sharedPrefs, sharedCipher))
+        val writer = MistralApiKeyStore(ApiKeyRepository(sharedPrefs, sharedCipher))
+        reader.set("old-synthetic").getOrThrow()
+        armed.set(true)
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(2)
+        try {
+            val reading = pool.submit<MistralApiKeyResult> { reader.read() }
+            assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            val writing = pool.submit {
+                writerStarted.countDown()
+                try { writer.set("new-synthetic").getOrThrow() } finally { writerDone.countDown() }
+            }
+            assertTrue(writerStarted.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            val wroteWhileReadPaused = writerDone.await(250, java.util.concurrent.TimeUnit.MILLISECONDS)
+            release.countDown()
+            val result = reading.get(5, java.util.concurrent.TimeUnit.SECONDS)
+            writing.get(5, java.util.concurrent.TimeUnit.SECONDS)
+            assertFalse("second store wrote during another store's read/reset transaction", wroteWhileReadPaused)
+            assertEquals(if (pauseDuringDecrypt) MistralApiKeyResult.Unreadable else
+                MistralApiKeyResult.Present("old-synthetic"), result)
+            assertEquals("cipher-new-synthetic", values[ApiKeyRepository.ENCRYPTED_KEY])
+            assertEquals("iv-new-synthetic", values[ApiKeyRepository.IV_KEY])
+            assertFalse(values.containsKey(ApiKeyRepository.UNREADABLE_FLAG))
+            assertEquals(if (pauseDuringDecrypt) 1 else 0, resets.get())
+            assertEquals(MistralApiKeyResult.Present("new-synthetic"), writer.read())
+        } finally {
+            release.countDown()
+            pool.shutdownNow()
+        }
     }
 
     private fun assertResolveFails(
