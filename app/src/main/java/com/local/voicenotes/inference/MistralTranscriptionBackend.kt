@@ -61,8 +61,8 @@ class MistralTranscriptionBackend(private val context: Context) : UriTranscripti
     override suspend fun validate(model: ImportedModel): Result<Unit> = withContext(Dispatchers.IO) {
         runCatchingCancellable {
             require(model.backend == "mistral-api") { "This is not a Mistral API model." }
-            require(model.architecture == "voxtral-mini-transcribe-latest") {
-                "Mistral API only supports voxtral-mini-transcribe-latest model."
+            require(model.architecture == "voxtral-mini-latest") {
+                "Mistral API only supports voxtral-mini-latest model."
             }
         }
     }

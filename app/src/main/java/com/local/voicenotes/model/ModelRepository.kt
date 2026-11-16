@@ -76,7 +76,7 @@ internal object ModelRecords {
         displayName = "Mistral Voxtral Mini (API)",
         path = "",
         sizeBytes = 0L,
-        architecture = "voxtral-mini-transcribe-latest",
+        architecture = "voxtral-mini-latest",
         backend = "mistral-api",
         enabled = true,
         note = "Uses Mistral API - requires API key",

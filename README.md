@@ -9,7 +9,7 @@ The app does not include a Parakeet model. Import a stateful `.tflite` export af
 - Transcribes OGG and Opus voice notes, MP3, M4A, AAC, and WAV files.
 - Runs portable Parakeet models on the CPU without a network connection.
 - Runs chip-specific Parakeet exports through LiteRT and Qualcomm QNN.
-- Offers `voxtral-mini-transcribe-latest` as an online alternative.
+- Offers `voxtral-mini-latest` as an online alternative.
 - Supports automatic language detection and 12 named languages: German, English, Spanish, French, Italian, Portuguese, Dutch, Polish, Turkish, Japanese, Korean, and Chinese.
 - Keeps the transcript editable and provides a copy button.
 - Shows model loading, audio decoding, transcription progress, elapsed time, cancellation, and errors.
@@ -100,7 +100,7 @@ The tested SM8450 file matched the publisher's SHA-256 checksum.
 4. Select `Mistral Voxtral Mini (API)` as the model.
 5. Select an audio file and tap `Transcribe`.
 
-This option requires internet access. It uploads the original audio to `https://api.mistral.ai/v1/audio/transcriptions` and requests `voxtral-mini-transcribe-latest`. If you select a language, the app sends its language code. Auto-detect omits that field.
+This option requires internet access. It uploads the original audio to `https://api.mistral.ai/v1/audio/transcriptions` and requests `voxtral-mini-latest`. If you select a language, the app sends its language code. Auto-detect omits that field.
 
 The app encrypts the saved key with AES-GCM. The encryption key stays in Android Keystore. Developers may also provide `MISTRAL_API_KEY` in the app process environment; that value takes precedence over the saved key.
 
