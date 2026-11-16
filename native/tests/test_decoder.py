@@ -178,7 +178,7 @@ class DecoderTest(unittest.TestCase):
             self.assertEqual(-10002,error.value)
             self.assertGreaterEqual(calls,3)
 
-    def test_cancellation_is_checked_inside_native_read(self):
+    def test_pre_cancelled_read_returns_cancellation(self):
         check_type=C.CFUNCTYPE(C.c_int,C.c_void_p)
         cancelled=False
         callback=check_type(lambda _:int(cancelled))
@@ -192,6 +192,46 @@ class DecoderTest(unittest.TestCase):
             pcm=(C.c_float*5760)()
             self.assertEqual(-10002,self.lib.vn_read(handle,pcm,5760))
         finally:self.lib.vn_close(handle)
+
+    def test_cancellation_becomes_true_inside_one_read_after_prior_pcm(self):
+        path = self.root / 'read-cancellation.opus'
+        # Enough incompressible audio to require provider read callbacks after open.
+        subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i',
+                        'anoisesrc=color=white:seed=1234:sample_rate=48000:duration=8',
+                        '-c:a', 'libopus', '-b:a', '256k', str(path)], check=True)
+        check_type = C.CFUNCTYPE(C.c_int, C.c_void_p)
+        armed = False
+        polls_this_call = 0
+        def cancelled(_):
+            nonlocal polls_this_call
+            polls_this_call += 1
+            return int(armed and polls_this_call >= 3)
+        callback = check_type(cancelled)
+        self.lib.vn_open_controlled.argtypes = [C.c_int, C.c_longlong, C.c_longlong, C.POINTER(C.c_int), check_type, C.c_void_p]
+        self.lib.vn_open_controlled.restype = C.c_void_p
+        with path.open('rb') as source:
+            handle = self.lib.vn_open_controlled(source.fileno(), 0, path.stat().st_size, None, callback, None)
+        self.assertTrue(handle)
+        try:
+            pcm = (C.c_float * 5760)()
+            prior_frames = self.lib.vn_read(handle, pcm, len(pcm))
+            self.assertGreater(prior_frames, 0, 'must emit PCM before cancellation is armed')
+            armed = True
+            while True:
+                # Per-operation reset is essential: entry/exit polls across many
+                # successful calls must not masquerade as a callback inside read.
+                polls_this_call = 0
+                n = self.lib.vn_read(handle, pcm, len(pcm))
+                if n < 0:
+                    self.assertEqual(n, -10002)
+                    self.assertGreaterEqual(polls_this_call, 3, 'entry-only cancellation is NOT during-read coverage')
+                    self.assertGreater(prior_frames, 0)
+                    break
+                self.assertGreater(n, 0, 'EOF without ever cancelling inside a native read')
+                self.assertLess(polls_this_call, 3)
+                prior_frames += n
+        finally:
+            self.lib.vn_close(handle)
 
     def test_large_non_opus_file_remains_eligible_for_android_fallback(self):
         import struct
@@ -213,6 +253,29 @@ class DecoderTest(unittest.TestCase):
         with path.open('rb') as source:
             for _ in range(100): self.assertFalse(self.lib.vn_open(source.fileno(),0,8,None))
         self.assertEqual(before,len(os.listdir('/proc/self/fd')))
+
+
+class DeviceFixtureTest(unittest.TestCase):
+    def test_required_synthetic_pack_and_signal_guards(self):
+        script = Path(__file__).with_name('generate_device_fixtures.py')
+        self.assertTrue(script.is_file(), 'reproducible device fixture generator is required')
+        import generate_device_fixtures as fixtures
+        with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as tmp:
+            root = Path(tmp)
+            fixtures.generate(root)
+            manifest = fixtures.validate_pack(root)
+            self.assertEqual(set(manifest['fixtures']), set(fixtures.REQUIRED))
+            for name, entry in manifest['fixtures'].items():
+                if entry.get('reject'): continue
+                ref = fixtures.read_pcm(root / entry['reference'])
+                self.assertEqual(entry['expected_samples'], 21072)
+                self.assertEqual(len(ref), entry['expected_samples'])
+                fixtures.validate_pcm(ref, ref, entry['expected_samples'])
+                for broken in ([0.0] * len(ref), ref[:-100], [-x for x in ref]):
+                    with self.assertRaises(AssertionError):
+                        fixtures.validate_pcm(broken, ref, entry['expected_samples'])
+            (root / 'tone.wav').unlink()
+            with self.assertRaises(AssertionError): fixtures.validate_pack(root)
 
 
 if __name__ == '__main__': unittest.main()

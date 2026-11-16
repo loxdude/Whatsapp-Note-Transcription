@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <queries>
+        <package android:name="com.local.voicenotes.litert" />
+    </queries>
+    <application>
+        <!-- Test APK only. The provider also checks the caller UID and accepts no paths. -->
+        <provider
+            android:name="com.local.voicenotes.audio.DecoderFixtureProvider"
+            android:authorities="com.local.voicenotes.litert.test.decoder-fixtures"
+            android:exported="true"
+            android:grantUriPermissions="false" />
+    </application>
+</manifest>

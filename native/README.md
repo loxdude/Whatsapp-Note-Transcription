@@ -59,6 +59,24 @@ streams, subfile offsets/lengths, fd ownership, pipe fallback, invalid ranges an
 failed-open fd leaks, oversized continued tags and cancellation during opening/reading. JVM tests (`./gradlew testDebugUnitTest`) cover resampling,
 known/unknown length limits, cancellation, native errors and progress.
 
+The device runner requires a small public synthetic pack; private recordings are optional:
+
+```sh
+python3 native/tests/generate_device_fixtures.py /absolute/path/outside/checkout/decoder-fixtures
+```
+
+It creates `tone.opus`, `tone.wav`, `tone.mp3`, a rejected garbage file, a checksum manifest
+and 16 kHz float references using a recorded ffmpeg build. Silence, truncation and phase
+inversion are negative controls. The runner fails if required files/references are missing;
+checks sample counts and normalized signal error (allowing resampler differences), and
+keeps route assertions. No generated audio/PCM belongs in git.
+
+The test APK also contains a UID-restricted, test-only Binder ContentProvider. The runner
+checks a nonzero asset offset/length against direct native PCM bit-for-bit, verifies shared
+fd position/ownership, and checks refusal/cleanup of a genuine pipe. The pipe must attempt
+Android fallback, but successful MediaExtractor decoding of an unseekable Ogg stream is
+not promised. The provider has no production APK component or arbitrary file-path API.
+
 For device checks, build the app and test APK:
 
 ```sh
