@@ -118,6 +118,9 @@ class TranscriptionCoordinator(
     private fun finishIfCurrent(token: Long, transform: (AppUiState) -> AppUiState): Boolean = locked {
         if (token != generation) return@locked false
         write(transform)
+        // A terminal state retires the token: progress callbacks that a backend still
+        // delivers after returning can no longer turn Completed/Failed back into busy.
+        generation++
         if (foregroundToken == token) {
             foreground = null
             foregroundKind = null
@@ -170,14 +173,33 @@ class TranscriptionCoordinator(
 
     // ---- Model list ---------------------------------------------------------------------
 
-    fun refreshModels(): Job = scope.launch {
+    fun refreshModels(): Job {
+        // Snapshot versions *before* the (possibly slow) catalog reads, so a newer import,
+        // selection or cancellation that lands meanwhile is not overwritten by this result.
+        val (startVersion, startGeneration) = locked { modelsVersion to generation }
+        return scope.launch { runRefresh(startVersion, startGeneration) }
+    }
+
+    private suspend fun runRefresh(startVersion: Long, startGeneration: Long) {
         val loaded = runCatchingCancellable { catalog.models() to catalog.selectedModelId() }
         val (models, saved) = loaded.getOrElse { error ->
             log("Model list refresh failed: ${error.message}")
-            return@launch
+            return
         }
         val toPrepare = locked {
-            if (disposed) return@launch
+            if (disposed) return
+            // A newer list (import, reconcile, later refresh) is already published: this
+            // snapshot is stale and must neither replace the list nor an existing selection.
+            // It may only fill in a missing selection from the *current* list.
+            if (modelsVersion != startVersion) {
+                val state = mutableState.value
+                if (state.selectedModelId == null) {
+                    val fallback = state.models.firstOrNull { it.id == saved && it.enabled }?.id
+                        ?: state.models.firstOrNull { it.enabled }?.id
+                    if (fallback != null) write { it.copy(selectedModelId = fallback) }
+                }
+                return
+            }
             // A refresh can finish after the user has selected a model. Keep that in-memory
             // choice instead of restoring the older persisted selection over it.
             val current = mutableState.value.selectedModelId
@@ -187,7 +209,11 @@ class TranscriptionCoordinator(
             modelsVersion++
             write { it.copy(models = models, selectedModelId = selected) }
             // An import or transcription owns the progress; it will prepare when needed.
-            if (foregroundRunning()) null else models.firstOrNull { it.id == selected }
+            // If any operation started, finished or was cancelled since the refresh began,
+            // its terminal state (e.g. Cancelled) stays visible; the backend still prepares
+            // lazily on the next transcription.
+            if (foregroundRunning() || generation != startGeneration) null
+            else models.firstOrNull { it.id == selected }
         }
         toPrepare?.let(::prepare)
     }

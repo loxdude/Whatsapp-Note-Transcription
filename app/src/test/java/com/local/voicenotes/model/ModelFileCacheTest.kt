@@ -40,7 +40,7 @@ class ModelFileCacheTest {
         source: ModelFileCache.Source,
         target: ModelFileCache = cache,
         checkCancelled: () -> Unit = {}
-    ): File = target.acquire(source, checkCancelled).also { synchronized(leases) { leases += it } }.file
+    ): File = target.acquire(source, checkCancelled = checkCancelled).also { synchronized(leases) { leases += it } }.file
 
     private fun blobs(): List<File> = File(root, "blobs").listFiles().orEmpty().toList()
     private fun tmpFiles(): List<File> = File(root, "tmp").listFiles().orEmpty().toList()

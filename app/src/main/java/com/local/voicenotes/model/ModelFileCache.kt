@@ -84,13 +84,13 @@ class ModelFileCache(
      */
     fun acquire(
         source: Source,
-        checkCancelled: () -> Unit = {},
         /**
          * Path of a blob the caller already has open and verified (e.g. backing a live
          * session). A cache hit on any *other* blob is re-hashed before it is returned, so
          * same-length corruption of a private copy is replaced instead of loaded.
          */
-        trustedBlobPath: String? = null
+        trustedBlobPath: String? = null,
+        checkCancelled: () -> Unit = {}
     ): Lease {
         require(source.expectedSize > 0) { "The model has no recorded size." }
         return withDirectoryLock(checkCancelled) {

@@ -385,7 +385,7 @@ class LiteRtParakeetBackend internal constructor(
             // CompiledModel's native loader requires a regular filesystem
             // path; unlike Interpreter it cannot consume a SAF descriptor.
             // The cache is content-addressed: the source is hashed on every call.
-            val lease = modelCache.acquire(SafModelSource(model, uri), checkCancelled, trustedBlobPath)
+            val lease = modelCache.acquire(SafModelSource(model, uri), trustedBlobPath, checkCancelled)
             ModelFile(lease.file.absolutePath, null, lease)
         } else {
             ModelFile(File(model.path).absolutePath, null, null)
