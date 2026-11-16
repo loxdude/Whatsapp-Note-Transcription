@@ -3,7 +3,7 @@ package com.local.voicenotes.concurrent
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancelAndJoin
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
@@ -64,9 +64,13 @@ class CancellationTest {
     }
 
     @Test fun cancellingTheJobStopsABlockingCopyPromptly() = runBlocking {
+        val started = CompletableDeferred<Unit>()
         val endless = object : InputStream() {
             override fun read(): Int = 0
-            override fun read(b: ByteArray, off: Int, len: Int): Int = len
+            override fun read(b: ByteArray, off: Int, len: Int): Int {
+                started.complete(Unit)
+                return len
+            }
         }
         val sink = object : OutputStream() { override fun write(b: Int) {} ; override fun write(b: ByteArray, off: Int, len: Int) {} }
         var failure: Throwable? = null
@@ -78,8 +82,7 @@ class CancellationTest {
                 throw e
             }
         }
-        delay(20)
-        withTimeout(2_000) { job.cancelAndJoin() }
+        withTimeout(2_000) { started.await(); job.cancelAndJoin() }
         assertTrue(job.isCancelled)
         assertTrue(failure is CancellationException)
     }

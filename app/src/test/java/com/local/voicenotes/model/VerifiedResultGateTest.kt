@@ -38,15 +38,21 @@ class VerifiedResultGateTest {
 
     @Test fun resultIsHeldBackUntilVerificationPasses() {
         val release = CountDownLatch(1)
+        val waiting = CountDownLatch(1)
         val pending = verification { release.await(5, TimeUnit.SECONDS); true }
         val returned = CountDownLatch(1)
         val worker = Thread {
-            VerifiedResultGate.run({}, { fail("not unverified") }) { VerifiedResultGate.Attempt("text", pending) }
+            VerifiedResultGate.run({ waiting.countDown() }, { fail("not unverified") }) {
+                VerifiedResultGate.Attempt("text", pending)
+            }
             returned.countDown()
         }.apply { start() }
-
-        assertTrue("result must wait for the verification", !returned.await(200, TimeUnit.MILLISECONDS))
-        release.countDown()
+        try {
+            assertTrue("worker must actually reach the verification wait", waiting.await(5, TimeUnit.SECONDS))
+            assertTrue("result must wait for the verification", !returned.await(50, TimeUnit.MILLISECONDS))
+        } finally {
+            release.countDown()
+        }
         assertTrue(returned.await(5, TimeUnit.SECONDS))
         worker.join()
     }

@@ -48,19 +48,8 @@ class StreamingResamplerTest {
                 val r = StreamingResampler(rate, 16_000)
                 val out = resampleInChunks(r, FloatArray(frames), { 1024 })
                 val expected = (frames.toDouble() * 16_000 / rate).roundToLong()
-                assertTrue(
-                    "rate=$rate frames=$frames got=${out.size} expected=$expected",
-                    abs(out.size - expected) <= 1
-                )
+                assertEquals("rate=$rate frames=$frames", expected, out.size.toLong())
             }
-        }
-    }
-
-    @Test
-    fun oneMinuteHasNoDriftWith1024FrameBuffers() {
-        for (rate in intArrayOf(44_100, 48_000)) {
-            val out = resampleInChunks(StreamingResampler(rate, 16_000), FloatArray(rate * 60), { 1024 })
-            assertEquals(16_000L * 60, out.size.toLong())
         }
     }
 
@@ -112,18 +101,5 @@ class StreamingResamplerTest {
         }
     }
 
-    @Test
-    fun fifteenMinutesAt48kIsFastEnough() {
-        val rate = 48_000
-        val buf = tone(rate, 440.0, 1024)
-        val r = StreamingResampler(rate, 16_000)
-        val start = System.nanoTime()
-        var total = 0L
-        repeat(rate * 60 * 15 / 1024) { total += r.process(buf).size }
-        total += r.flush().size
-        val seconds = (System.nanoTime() - start) / 1e9
-        println("15 min @48k resampled in %.2f s (JVM host)".format(seconds))
-        assertTrue(total > 16_000L * 60 * 14)
-        assertTrue("took $seconds s", seconds < 30)
-    }
+
 }

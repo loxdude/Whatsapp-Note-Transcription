@@ -29,8 +29,10 @@ class UltraTdtTest {
         }
     }
 
-    private fun network(vararg steps: Step, fallback: Step = Step(UltraTdt.BLANK, 1)) =
-        FakeNetwork { call, _, _ -> logits(steps.getOrElse(call) { fallback }) }
+    private fun network(vararg steps: Step, fallback: Step = Step(UltraTdt.BLANK, 1)): FakeNetwork {
+        val vectors = (steps.toList() + fallback).distinct().associateWith(::logits)
+        return FakeNetwork { call, _, _ -> vectors.getValue(steps.getOrElse(call) { fallback }) }
+    }
 
     @Test fun emitsTokensAdvancesByDurationAndFeedsPredict() {
         val net = network(Step(100, 2), Step(UltraTdt.BLANK, 3), Step(200, 0), Step(201, 1))

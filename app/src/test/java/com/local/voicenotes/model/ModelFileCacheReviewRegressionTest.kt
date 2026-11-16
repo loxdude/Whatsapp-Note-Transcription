@@ -47,7 +47,7 @@ class ModelFileCacheReviewRegressionTest {
         held.close()
     }
 
-    @Test fun trustedBlobPathSkipsTheBlobRehash() {
+    @Test fun trustedBlobPathReusesTheHealthyBlobWithoutReportingCorruption() {
         val s = Source("AAAAAAAA".toByteArray()); val c = ModelFileCache(tmp.root, 4)
         val path = c.acquire(s).use { it.file.path }
         val before = ModelFileCache.corruptBlobsDetected

@@ -275,12 +275,14 @@ class ModelFileCacheTest {
 
     @Test fun replacedBlobIsAlsoCollectedByTheNextAcquireOfAnotherSource() {
         val replaced = FakeSource("content://models/v3", modelBytes(9))
-        val replacedFile = acquire(replaced)
-        leases.forEach { it.close() }
-        leases.clear()
+        val lease = cache.acquire(replaced)
+        val replacedFile = lease.file
         cache.forget(listOf(replaced.key))
-        assertFalse(replacedFile.exists())
-        assertTrue(blobs().isEmpty())
+        assertTrue("forget preserves the live lease", replacedFile.exists())
+        lease.close()
+        val other = acquire(FakeSource("content://models/other", modelBytes(10)))
+        assertFalse("the next acquire collects the now-unleased old blob", replacedFile.exists())
+        assertEquals(listOf(other.name), blobs().map { it.name })
     }
 
     @Test fun forgetOnMissingCacheIsANoOp() {

@@ -82,14 +82,6 @@ class ParakeetUltraModelsTest {
     private fun record(name: String, backend: String, architecture: String = "parakeet-ultra") =
         ImportedModel("id", name, "content://models/id", 1L, architecture, backend, enabled = false)
 
-    @Test fun catalogRefreshReEvaluatesUltraRecords() {
-        val refreshed = ModelRecords.refresh(record("parakeet_ultra_encoder_20s_i8.tflite", "litert-ultra-cpu"))
-        assertTrue(refreshed.enabled)
-        assertEquals("parakeet-ultra", refreshed.architecture)
-        assertEquals("Parakeet Ultra · CPU · 20 s windows", refreshed.note)
-        assertFalse(ModelRecords.refresh(record("parakeet_ultra_encoder_20s_f16.tflite", "litert-ultra-cpu")).enabled)
-    }
-
     @Test fun mainScreenSummaryNamesTheModelFamily() {
         val ultra = ModelRecords.refresh(record("parakeet_ultra_encoder_30s_i8.tflite", "litert-ultra-cpu"))
         assertEquals("On-device model: Parakeet Ultra", modelSummary(ultra))

@@ -1,4 +1,5 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.gradle.api.tasks.testing.Test
 
 plugins {
     id("com.android.application")
@@ -72,4 +73,21 @@ dependencies {
     androidTestImplementation("androidx.compose.foundation:foundation:1.9.0")
     androidTestImplementation("androidx.compose.animation:animation:1.9.0")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
+}
+
+// Functional tests stay independent of host speed; run this probe explicitly when tuning.
+tasks.withType<Test>().configureEach {
+    if (name == "testDebugUnitTest" || name == "testReleaseUnitTest") {
+        filter.excludeTestsMatching("com.local.voicenotes.audio.StreamingResamplerBenchmark")
+    }
+}
+tasks.register<Test>("resamplerBenchmark") {
+    group = "verification"
+    description = "Optional 15-minute resampler host timing probe"
+    dependsOn("testDebugUnitTest")
+    val unit = tasks.named<Test>("testDebugUnitTest").get()
+    testClassesDirs = unit.testClassesDirs
+    classpath = unit.classpath
+    filter.includeTestsMatching("com.local.voicenotes.audio.StreamingResamplerBenchmark")
+    testLogging.showStandardStreams = true
 }

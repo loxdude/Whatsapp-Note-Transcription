@@ -249,6 +249,7 @@ class ModelFileCacheFastPathTest {
         source.onOpen = { throw IllegalStateException("provider crashed") }
         assertFalse(fast.verify(pool))
         assertTrue(cache().fastPathMarked(source))
+        assertNull("failed source cannot re-enter the recorded fast path", recorded(source))
         source.onOpen = {}
         fullAcquire(source)
         assertFalse(cache().fastPathMarked(source))
@@ -261,15 +262,6 @@ class ModelFileCacheFastPathTest {
         assertEquals(BackgroundVerification.Outcome.VERIFIED, fast.startVerification(pool).await())
         assertFalse(cache().fastPathMarked(source))
         assertNotNull(recorded(source))
-    }
-
-    @Test fun failingSourceDuringVerificationCountsAsFailedVerification() {
-        val source = Source(modelBytes(1), stamp = "s")
-        fullAcquire(source)
-        val fast = recorded(source)!!
-        source.onOpen = { throw IllegalStateException("provider crashed") }
-        assertFalse(fast.verify(pool))
-        assertNull(recorded(source))
     }
 
     @Test fun legacyCacheWithoutRecordsStillWorksAndGainsARecord() {
