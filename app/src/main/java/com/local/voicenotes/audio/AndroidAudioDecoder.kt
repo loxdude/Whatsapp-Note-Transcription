@@ -10,13 +10,23 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import java.nio.ByteOrder
 import kotlin.coroutines.coroutineContext
-import kotlin.math.roundToInt
 
 class AndroidAudioDecoder(private val resolver: ContentResolver) {
     companion object {
         const val TARGET_SAMPLE_RATE = 16_000
         const val MAX_DURATION_US = 15L * 60L * 1_000_000L
         private const val TIMEOUT_US = 10_000L
+        /** Hard cap on decoded 16 kHz samples (15 minutes, 14.4M floats). */
+        internal const val MAX_OUTPUT_SAMPLES = TARGET_SAMPLE_RATE * 60 * 15
+        /** Presize slack over the container duration (~0.26 s) for codec priming/rounding. */
+        private const val PRESIZE_SLACK_SAMPLES = 4_096
+        /** Initial capacity when the duration is unknown (grows 1.5x up to the cap). */
+        private const val UNKNOWN_DURATION_SAMPLES = TARGET_SAMPLE_RATE * 60
+
+        internal fun initialCapacityFor(durationUs: Long): Int = if (durationUs > 0) {
+            val estimate = (durationUs * TARGET_SAMPLE_RATE + 500_000L) / 1_000_000L + PRESIZE_SLACK_SAMPLES
+            estimate.coerceIn(1L, MAX_OUTPUT_SAMPLES.toLong()).toInt()
+        } else UNKNOWN_DURATION_SAMPLES
     }
 
     suspend fun decode(uri: Uri, onProgress: (Float) -> Unit): FloatArray = withContext(Dispatchers.IO) {
@@ -36,10 +46,7 @@ class AndroidAudioDecoder(private val resolver: ContentResolver) {
             require(durationUs <= 0L || durationUs <= MAX_DURATION_US) {
                 "Audio is longer than the 15-minute limit."
             }
-            val expectedSamples = if (durationUs > 0) {
-                ((durationUs * TARGET_SAMPLE_RATE / 1_000_000L) + TARGET_SAMPLE_RATE).toInt()
-            } else TARGET_SAMPLE_RATE * 60
-            val output = FloatAccumulator(expectedSamples, TARGET_SAMPLE_RATE * 60 * 15)
+            val output = FloatAccumulator(initialCapacityFor(durationUs), MAX_OUTPUT_SAMPLES)
             val codec = MediaCodec.createDecoderByType(mime)
             try {
                 codec.configure(sourceFormat, null, null, 0)
@@ -68,7 +75,8 @@ class AndroidAudioDecoder(private val resolver: ContentResolver) {
         var outputEnded = false
         var sampleRate = 0
         var channels = 0
-        var pcmEncoding = android.media.AudioFormat.ENCODING_PCM_16BIT
+        var pcmFormat = PcmSampleFormat.PCM_16BIT
+        var resampler: StreamingResampler? = null
         val info = MediaCodec.BufferInfo()
         while (!outputEnded) {
             coroutineContext.ensureActive()
@@ -91,8 +99,14 @@ class AndroidAudioDecoder(private val resolver: ContentResolver) {
                     val format = codec.outputFormat
                     sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
                     channels = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
-                    pcmEncoding = format.intOrNull(MediaFormat.KEY_PCM_ENCODING)
-                        ?: android.media.AudioFormat.ENCODING_PCM_16BIT
+                    pcmFormat = PcmSampleFormat.fromAndroidEncoding(format.intOrNull(MediaFormat.KEY_PCM_ENCODING))
+                    require(sampleRate > 0 && channels > 0) { "Decoder returned invalid PCM metadata." }
+                    val current = resampler
+                    if (current == null || current.inRate != sampleRate) {
+                        // Rate change mid-stream: finish the old stream before switching.
+                        current?.let { output.append(it.flush()) }
+                        resampler = StreamingResampler(sampleRate, TARGET_SAMPLE_RATE)
+                    }
                 }
                 MediaCodec.INFO_TRY_AGAIN_LATER, MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED -> Unit
                 else -> if (index >= 0) {
@@ -101,8 +115,9 @@ class AndroidAudioDecoder(private val resolver: ContentResolver) {
                         buffer.position(info.offset)
                         buffer.limit(info.offset + info.size)
                         buffer.order(ByteOrder.nativeOrder())
-                        require(sampleRate > 0 && channels > 0) { "Decoder returned invalid PCM metadata." }
-                        appendResampled(buffer, pcmEncoding, channels, sampleRate, output)
+                        val active = resampler ?: error("Decoder returned PCM before its output format.")
+                        val mono = PcmDownmix.toMono(buffer, pcmFormat, channels)
+                        output.append(active.process(mono))
                     }
                     outputEnded = info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
                     if (durationUs > 0) onProgress((info.presentationTimeUs.toFloat() / durationUs).coerceIn(0f, 1f))
@@ -110,66 +125,9 @@ class AndroidAudioDecoder(private val resolver: ContentResolver) {
                 }
             }
         }
-    }
-
-    private fun appendResampled(
-        buffer: java.nio.ByteBuffer,
-        encoding: Int,
-        channels: Int,
-        sourceRate: Int,
-        output: FloatAccumulator
-    ) {
-        val bytesPerSample = if (encoding == android.media.AudioFormat.ENCODING_PCM_FLOAT) 4 else 2
-        val frames = buffer.remaining() / bytesPerSample / channels
-        if (frames <= 0) return
-        val mono = FloatArray(frames)
-        repeat(frames) { frame ->
-            var sum = 0f
-            repeat(channels) {
-                sum += if (encoding == android.media.AudioFormat.ENCODING_PCM_FLOAT) {
-                    buffer.float.coerceIn(-1f, 1f)
-                } else {
-                    buffer.short / 32768f
-                }
-            }
-            mono[frame] = sum / channels
-        }
-        if (sourceRate == TARGET_SAMPLE_RATE) {
-            output.append(mono)
-            return
-        }
-        val targetFrames = (frames.toDouble() * TARGET_SAMPLE_RATE / sourceRate).roundToInt().coerceAtLeast(1)
-        val resampled = FloatArray(targetFrames)
-        val scale = (frames - 1).toDouble() / (targetFrames - 1).coerceAtLeast(1)
-        repeat(targetFrames) { i ->
-            val position = i * scale
-            val left = position.toInt().coerceAtMost(frames - 1)
-            val right = (left + 1).coerceAtMost(frames - 1)
-            val fraction = (position - left).toFloat()
-            resampled[i] = mono[left] + (mono[right] - mono[left]) * fraction
-        }
-        output.append(resampled)
+        resampler?.let { output.append(it.flush()) }
     }
 
     private fun MediaFormat.longOrNull(key: String) = runCatching { getLong(key) }.getOrNull()
     private fun MediaFormat.intOrNull(key: String) = runCatching { getInteger(key) }.getOrNull()
 }
-
-internal class FloatAccumulator(initialCapacity: Int, private val maxSize: Int) {
-    private var values = FloatArray(initialCapacity.coerceIn(1, maxSize))
-    private var size = 0
-
-    fun append(chunk: FloatArray) {
-        require(size + chunk.size <= maxSize) { "Decoded audio exceeds the 15-minute limit." }
-        if (size + chunk.size > values.size) {
-            var next = values.size
-            while (next < size + chunk.size) next = (next * 2).coerceAtMost(maxSize)
-            values = values.copyOf(next)
-        }
-        chunk.copyInto(values, size)
-        size += chunk.size
-    }
-
-    fun toArray(): FloatArray = values.copyOf(size)
-}
-
