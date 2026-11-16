@@ -24,21 +24,24 @@ internal object OpusPcm {
         }
     }
 
+    fun capacityForFrames(frames: Long): Int = if (frames > 0)
+        ((frames + 1) / 3).coerceIn(1, 16_000L * 60 * 15).toInt() else 16_000 * 60
+
     fun decode(
         source: OpusPcmSource,
         onProgress: (Float) -> Unit,
         checkCancelled: () -> Unit,
-        maxInputFrames: Long = MAX_INPUT_FRAMES
+        maxInputFrames: Long = MAX_INPUT_FRAMES,
+        nowNanos: () -> Long = System::nanoTime
     ): FloatArray {
-        require(source.totalFrames <= maxInputFrames) { "Audio is longer than the 15-minute limit." }
-        val capacity = if (source.totalFrames > 0)
-            (source.totalFrames / 3 + 4096).coerceAtMost(16_000L * 60 * 15).toInt()
-        else 16_000 * 60
+        val totalFrames = source.totalFrames
+        require(totalFrames <= maxInputFrames) { "Audio is longer than the 15-minute limit." }
+        val capacity = capacityForFrames(totalFrames)
         val output = FloatAccumulator(capacity, 16_000 * 60 * 15)
         val resampler = StreamingResampler(RATE, 16_000)
         val buffer = FloatArray(5760)
         var frames = 0L
-        var progressAt = System.nanoTime()
+        var progressAt = nowNanos()
         while (true) {
             checkCancelled()
             val n = source.read(buffer)
@@ -47,10 +50,10 @@ internal object OpusPcm {
             if (n == 0) break
             frames += n
             require(frames <= maxInputFrames) { "Audio is longer than the 15-minute limit." }
-            output.append(resampler.process(if (n == buffer.size) buffer else buffer.copyOf(n)))
-            val now = System.nanoTime()
-            if (source.totalFrames > 0 && now - progressAt >= 100_000_000L) {
-                onProgress((frames.toFloat() / source.totalFrames).coerceIn(0f, 1f))
+            output.append(resampler.process(buffer, 0, n))
+            val now = nowNanos()
+            if (totalFrames > 0 && now - progressAt >= 100_000_000L) {
+                onProgress((frames.toFloat() / totalFrames).coerceIn(0f, 1f))
                 progressAt = now
             }
         }

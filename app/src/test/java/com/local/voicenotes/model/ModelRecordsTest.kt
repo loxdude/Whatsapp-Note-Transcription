@@ -59,8 +59,14 @@ class ModelRecordsTest {
 
     @Test fun enabledIsReEvaluatedOnEveryRead() {
         // A persisted enabled=false is not trusted for a usable encoder, and vice versa.
-        assertTrue(ModelRecords.refresh(record("a", enabled = false)).enabled)
-        assertFalse(ModelRecords.refresh(record("b", name = "parakeet_ultra_encoder_30s_f16.tflite")).enabled)
+        val refreshed = ModelRecords.refresh(record("a", name = "parakeet_ultra_encoder_20s_i8.tflite", enabled = false))
+        assertTrue(refreshed.enabled)
+        assertEquals("parakeet-ultra", refreshed.architecture)
+        assertEquals("litert-ultra-cpu", refreshed.backend)
+        assertEquals("Parakeet Ultra · CPU · 20 s windows", refreshed.note)
+        val disabled = ModelRecords.refresh(record("b", name = "parakeet_ultra_encoder_20s_f16.tflite"))
+        assertFalse(disabled.enabled)
+        assertEquals(ParakeetUltraModels.F16_NOTE, disabled.note)
     }
 
     @Test fun v3RecordsStayListedButDisabledWithAPointerToUltra() {
@@ -98,6 +104,17 @@ class ModelRecordsTest {
         // An imported Ultra encoder is picked instead of the replaced model.
         val withUltra = ModelRecords.catalog(listOf(v3("v3"), record("ultra"))) { true }
         assertEquals("ultra", chooseSelection(withUltra, current = null, saved = "v3"))
+    }
+
+    @Test fun replacedRecordsStayVisibleWithoutOpeningTheirProvider() {
+        val touched = mutableListOf<String>()
+        val catalog = ModelRecords.catalog(listOf(v3("gone-v3"), record("ultra"))) {
+            touched += it.id
+            it.id != "gone-v3"
+        }
+        assertEquals(listOf("ultra"), touched)
+        assertEquals(listOf(ModelRecords.BUILT_IN_MISTRAL_ID, "ultra", "gone-v3"), catalog.map { it.id })
+        assertFalse(catalog.last().enabled)
     }
 
     @Test fun nonLiteRtRecordsAreLeftAlone() {

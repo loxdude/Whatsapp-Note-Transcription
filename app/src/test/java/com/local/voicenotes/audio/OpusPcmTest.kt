@@ -82,7 +82,34 @@ class OpusPcmTest {
         } catch (expected: CancellationException) { }
     }
 
-    @Test fun `progress is monotonic and completes even with unknown length`() {
+    @Test fun `known length uses exact rounded capacity and metadata is read once`() {
+        assertEquals(1, OpusPcm.capacityForFrames(1))
+        assertEquals(1, OpusPcm.capacityForFrames(4))
+        assertEquals(2, OpusPcm.capacityForFrames(5))
+        assertEquals(16_000, OpusPcm.capacityForFrames(48_000))
+        assertEquals(16_000 * 60 * 15, OpusPcm.capacityForFrames(48_000L * 60 * 15))
+        var reads = 0
+        val source = object : OpusPcmSource {
+            private val data = Source(FloatArray(48_000))
+            override val totalFrames: Long get() { reads++; return 48_000 }
+            override fun read(target: FloatArray) = data.read(target)
+            override fun close() = Unit
+        }
+        assertEquals(16_000, OpusPcm.decode(source, {}, {}).size)
+        assertEquals(1, reads)
+    }
+
+    @Test fun `progress emits meaningful intermediate updates on a controlled clock`() {
+        val progress = mutableListOf<Float>()
+        var now = 0L
+        OpusPcm.decode(Source(FloatArray(48_000)), { progress += it }, {}, nowNanos = { now += 120_000_000; now })
+        assertTrue(progress.size > 2)
+        assertTrue(progress.first() > 0f && progress.first() < 1f)
+        assertTrue(progress.zipWithNext().all { (a, b) -> a <= b })
+        assertEquals(1f, progress.last(), 0f)
+    }
+
+    @Test fun `progress completes even with unknown length`() {
         for (total in listOf(-1L, 48_000L)) {
             val progress = mutableListOf<Float>()
             OpusPcm.decode(Source(FloatArray(48_000), total), { progress += it }, {})

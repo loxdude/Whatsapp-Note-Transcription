@@ -73,7 +73,8 @@ internal object ModelRecords {
 
     /** Catalog shown to the user: built-in cloud entry, then readable imports (usable ones first). */
     fun catalog(stored: List<ImportedModel>, isReadable: (ImportedModel) -> Boolean): List<ImportedModel> {
-        val imported = stored.filter(isReadable).map(::refresh).sortedByDescending { it.enabled }
+        val imported = stored.filter { ParakeetUltraModels.isReplacedV3(it) || isReadable(it) }
+            .map(::refresh).sortedByDescending { it.enabled }
         return (listOf(builtInMistral) + imported).distinctBy { it.id }
     }
 
@@ -146,45 +147,36 @@ class ModelRepository(private val context: Context) {
             ?: resolver.openAssetFileDescriptor(uri, "r")?.use { it.length }
             ?: -1L
 
-        require(sourceLength > 0) { "The selected model has no readable size." }
-        require(displayName.endsWith(".tflite", ignoreCase = true)) {
-            "Choose a Parakeet Ultra encoder (parakeet_ultra_encoder_30s_i8.tflite)."
-        }
-        // Rejected before the grant is persisted, so a refused file leaves nothing behind.
-        ParakeetUltraModels.importError(displayName)?.let { throw IllegalArgumentException(it) }
-        val header = resolver.openInputStream(uri)?.use { input ->
-            ByteArray(8).also { require(input.read(it) == it.size) { "The model header is truncated." } }
-        } ?: error("Cannot read the selected model.")
-        require(header.copyOfRange(4, 8).contentEquals("TFL3".encodeToByteArray())) {
-            "This is not a valid LiteRT/TFLite flatbuffer."
-        }
-        resolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        validateThenImport(displayName, sourceLength, {
+            resolver.openInputStream(uri) ?: error("Cannot read the selected model.")
+        }) { evaluation ->
+            resolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
 
-        val evaluation = ParakeetUltraModels.evaluate(displayName)
-        val hash = MessageDigest.getInstance("SHA-256")
-            .digest("${uri}|$sourceLength".encodeToByteArray())
-            .joinToString("") { "%02x".format(it) }
-        val model = ImportedModel(
-            id = hash,
-            displayName = displayName,
-            path = uri.toString(),
-            sizeBytes = sourceLength,
-            architecture = evaluation.architecture,
-            backend = evaluation.backend,
-            enabled = evaluation.enabled,
-            note = evaluation.note
-        )
-        // Do not persist an import that was cancelled while it was being inspected.
-        coroutineContext.ensureActive()
-        context.modelDataStore.edit { prefs ->
-            // Read-modify-write inside edit: atomic with concurrent writers, and based on the
-            // raw stored records, so temporarily unreadable models are never dropped.
-            val stored = rawRecords(prefs[modelsKey].orEmpty())
-            val updated = ModelRecords.mergeImport(stored, ::recordId, encodeRecord(model), hash)
-            prefs[modelsKey] = JSONArray().apply { updated.forEach { put(it) } }.toString()
+            val hash = MessageDigest.getInstance("SHA-256")
+                .digest("${uri}|$sourceLength".encodeToByteArray())
+                .joinToString("") { "%02x".format(it) }
+            val model = ImportedModel(
+                id = hash,
+                displayName = displayName,
+                path = uri.toString(),
+                sizeBytes = sourceLength,
+                architecture = evaluation.architecture,
+                backend = evaluation.backend,
+                enabled = evaluation.enabled,
+                note = evaluation.note
+            )
+            // Do not persist an import that was cancelled while it was being inspected.
+            coroutineContext.ensureActive()
+            context.modelDataStore.edit { prefs ->
+                // Read-modify-write inside edit: atomic with concurrent writers, and based on the
+                // raw stored records, so temporarily unreadable models are never dropped.
+                val stored = rawRecords(prefs[modelsKey].orEmpty())
+                val updated = ModelRecords.mergeImport(stored, ::recordId, encodeRecord(model), hash)
+                prefs[modelsKey] = JSONArray().apply { updated.forEach { put(it) } }.toString()
+            }
+            onProgress(1f)
+            model
         }
-        onProgress(1f)
-        model
     }
 
     private fun rawRecords(value: String): List<Any?> {

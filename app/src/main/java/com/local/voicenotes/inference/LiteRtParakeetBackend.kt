@@ -625,7 +625,7 @@ class LiteRtParakeetBackend(private val context: Context) : TranscriptionBackend
         /** Runs the mel graph on [length] samples from [start], zero-padded to the graph size. */
         fun mel(pcm: FloatArray, start: Int, length: Int): UltraMel {
             require(length in 1..graphSamples) { "Parakeet Ultra window does not fit its graph." }
-            audio.fill(0f)
+            audio.fill(0f, length, audio.size)
             System.arraycopy(pcm, start, audio, 0, length)
             melInputs.getValue("audio").writeFloat(audio)
             melInputs.getValue("n_valid").writeInt(intArrayOf(length))
