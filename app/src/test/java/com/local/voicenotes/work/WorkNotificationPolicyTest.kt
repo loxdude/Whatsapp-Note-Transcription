@@ -83,4 +83,37 @@ class WorkNotificationPolicyTest {
         // Nothing was observed running (e.g. work finished before the service started).
         assertNull(WorkNotificationPolicy.finished(null, state(completed("hi"))))
     }
+
+    @Test fun pendingShareKeepsTheServiceRunningUntilItsTranscriptionTakesOver() {
+        val idle = state(TranscriptionProgress.Idle)
+        assertFalse(WorkNotificationPolicy.shouldRun(idle, shareReserved = false))
+        val waiting = WorkNotificationPolicy.ongoing(idle, shareReserved = true)!!
+        assertEquals(WorkKind.SHARE, waiting.kind)
+        assertTrue(WorkNotificationPolicy.shouldRun(state(TranscriptionProgress.LoadingModel), shareReserved = true))
+        // Real work takes precedence over the reservation.
+        assertEquals(WorkKind.TRANSCRIPTION,
+            WorkNotificationPolicy.ongoing(state(TranscriptionProgress.Preparing), shareReserved = true)!!.kind)
+        // A share that ended without starting anything posts no notice.
+        assertNull(WorkNotificationPolicy.finished(WorkKind.SHARE, state(TranscriptionProgress.Failed("prep failed"))))
+    }
+
+    @Test fun lockScreenVersionsShowNeitherFileNameNorTranscript() {
+        val ongoing = WorkNotificationPolicy.ongoing(state(TranscriptionProgress.Transcribing(0.5f), audioName = "Secret meeting.opus"))!!
+        val publicOngoing = WorkNotificationPolicy.publicOngoing(ongoing)
+        assertFalse(publicOngoing.title.contains("Secret"))
+        assertFalse(publicOngoing.text.contains("Secret"))
+        assertEquals(ongoing.percent, publicOngoing.percent)
+
+        val transcript = "my bank PIN is 1234"
+        val finished = WorkNotificationPolicy.finished(
+            WorkKind.TRANSCRIPTION, state(completed(transcript), transcript = transcript, audioName = "Secret meeting.opus")
+        )!!
+        assertTrue(finished.text.contains("PIN"))
+        val publicFinished = WorkNotificationPolicy.publicFinished(finished)
+        assertEquals(finished.title, publicFinished.title)
+        assertFalse(publicFinished.text.contains("PIN"))
+        assertFalse(publicFinished.text.contains("Secret"))
+        val failed = WorkNotificationPolicy.publicFinished(FinishedNotice("Transcription failed", "Cannot read Secret meeting.opus"))
+        assertFalse(failed.text.contains("Secret"))
+    }
 }

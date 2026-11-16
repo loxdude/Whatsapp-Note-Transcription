@@ -18,14 +18,17 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
 /**
  * Keeps the process in the foreground while an import or transcription runs, so the work in
  * the app-scoped coordinator survives the activity being backgrounded or swiped away.
  *
- * The service holds no work itself: it mirrors the coordinator state into an ongoing
- * notification ([WorkNotificationPolicy]) and stops itself as soon as no work is running.
+ * The service holds no work itself: it mirrors the coordinator state (and pending share
+ * reservations, see [com.local.voicenotes.AppGraph.reserveWorkServiceForShare]) into an
+ * ongoing notification ([WorkNotificationPolicy]) and stops itself as soon as no work is
+ * running or reserved.
  * Type: mediaProcessing on API 35+, dataSync on API 31-34 (mediaProcessing does not exist).
  */
 class TranscriptionService : Service() {
@@ -67,10 +70,9 @@ class TranscriptionService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         latestStartId = startId
-        val state = appGraph.coordinator.state.value
         // startForeground must follow every startForegroundService(), even if the work has
-        // already finished; the observer below stops the service again right away then.
-        val notice = WorkNotificationPolicy.ongoing(state)
+        // already finished; onState() below stops the service again right away then.
+        val notice = currentNotice()
             ?: OngoingNotice(WorkKind.TRANSCRIPTION, "Voice notes", "Working", null)
         val notification = WorkNotifications.ongoing(this, notice)
         // Some OEM builds (seen on OxygenOS 16) reject mediaProcessing as "type none" even though
@@ -90,17 +92,28 @@ class TranscriptionService : Service() {
             }
         }
         if (lastRefusal != null) {
-            stopSelf(startId)
+            // Only stops if no newer start is pending (that one gets its own startForeground).
+            stopSelfResult(startId)
             return START_NOT_STICKY
         }
+        appGraph.workServiceInForeground = true
         if (observer == null) {
-            observer = scope.launch { appGraph.coordinator.state.collect(::onState) }
+            observer = scope.launch {
+                combine(appGraph.coordinator.state, appGraph.shareReservations) { state, reserved -> state to (reserved > 0) }
+                    .collect { (state, reserved) -> onState(state, reserved) }
+            }
         }
+        // Render the current state now: if work started and ended since the last start, the
+        // observer sees no new value and the placeholder above would otherwise stay.
+        onState(appGraph.coordinator.state.value, appGraph.shareReservations.value > 0)
         return START_NOT_STICKY
     }
 
-    private fun onState(state: AppUiState) {
-        val notice = WorkNotificationPolicy.ongoing(state)
+    private fun currentNotice(): OngoingNotice? =
+        WorkNotificationPolicy.ongoing(appGraph.coordinator.state.value, appGraph.shareReservations.value > 0)
+
+    private fun onState(state: AppUiState, shareReserved: Boolean) {
+        val notice = WorkNotificationPolicy.ongoing(state, shareReserved)
         if (notice != null) {
             lastKind = notice.kind
             if (inForeground && notice != shownNotice) {
@@ -128,6 +141,7 @@ class TranscriptionService : Service() {
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         inForeground = false
         shownNotice = null
+        appGraph.workServiceInForeground = false
     }
 
     /** API 35 time limit for dataSync/mediaProcessing (6 h): cancel and stop promptly. */
@@ -135,11 +149,12 @@ class TranscriptionService : Service() {
         Log.w(TAG, "Foreground service time limit reached; cancelling work")
         appGraph.coordinator.cancel()
         leaveForeground()
-        stopSelf()
+        stopSelfResult(latestStartId)
     }
 
     override fun onDestroy() {
         scope.cancel()
+        appGraph.workServiceInForeground = false
         super.onDestroy()
     }
 }

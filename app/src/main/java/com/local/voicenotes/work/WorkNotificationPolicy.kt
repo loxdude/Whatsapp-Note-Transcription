@@ -4,7 +4,11 @@ import com.local.voicenotes.AppUiState
 import com.local.voicenotes.domain.TranscriptionProgress
 import kotlin.math.roundToInt
 
-enum class WorkKind { IMPORT, TRANSCRIPTION }
+enum class WorkKind {
+    IMPORT, TRANSCRIPTION,
+    /** Audio was shared to the app; the service is held until its transcription can start. */
+    SHARE
+}
 
 /** Content of the ongoing foreground-service notification. [percent] null = indeterminate. */
 data class OngoingNotice(val kind: WorkKind, val title: String, val text: String, val percent: Int?)
@@ -16,17 +20,28 @@ data class FinishedNotice(val title: String, val text: String)
  * Pure mapping from coordinator state to foreground-service behaviour, kept free of Android
  * types so it can be unit-tested.
  *
- * The service runs exactly while an import or a transcription is in progress. Model
- * preparation after a selection ([TranscriptionProgress.LoadingModel]) is not user-started
- * long work and does not keep the service alive.
+ * The service runs exactly while an import or a transcription is in progress, or while
+ * shared audio waits for its automatic transcription (`shareReserved`: the service is
+ * started from the foreground when the share arrives, so the transcription is protected even
+ * if the user leaves before it begins). Model preparation after a selection
+ * ([TranscriptionProgress.LoadingModel]) alone is not user-started long work and does not
+ * keep the service alive.
+ *
+ * Lock screen: notifications are private; their public versions ([publicOngoing],
+ * [publicFinished]) never contain a file name or transcript text.
  */
 object WorkNotificationPolicy {
     const val PREVIEW_CHARS = 120
 
-    fun shouldRun(state: AppUiState): Boolean = ongoing(state) != null
+    fun shouldRun(state: AppUiState, shareReserved: Boolean = false): Boolean = ongoing(state, shareReserved) != null
 
     /** Null when no foreground work is running, i.e. the service should stop. */
-    fun ongoing(state: AppUiState): OngoingNotice? = when (val progress = state.progress) {
+    fun ongoing(state: AppUiState, shareReserved: Boolean = false): OngoingNotice? =
+        work(state) ?: if (shareReserved) {
+            OngoingNotice(WorkKind.SHARE, "Shared voice note", "Getting ready to transcribe", null)
+        } else null
+
+    private fun work(state: AppUiState): OngoingNotice? = when (val progress = state.progress) {
         is TranscriptionProgress.Importing ->
             OngoingNotice(WorkKind.IMPORT, "Importing model", "Copying and checking the model", percent(progress.fraction))
         TranscriptionProgress.Preparing ->
@@ -56,7 +71,22 @@ object WorkNotificationPolicy {
         }
         WorkKind.IMPORT -> (state.progress as? TranscriptionProgress.Failed)
             ?.let { FinishedNotice("Model import failed", it.message) }
+        // Nothing was started (e.g. no usable model): the main screen explains it.
+        WorkKind.SHARE -> null
     }
+
+    /** Lock-screen version of an ongoing notice: progress only, no audio file name. */
+    fun publicOngoing(notice: OngoingNotice): OngoingNotice = notice.copy(
+        title = when (notice.kind) {
+            WorkKind.IMPORT -> "Importing model"
+            WorkKind.TRANSCRIPTION -> "Transcribing voice note"
+            WorkKind.SHARE -> "Shared voice note"
+        }
+    )
+
+    /** Lock-screen version of a finished notice: no transcript preview, no error details. */
+    fun publicFinished(notice: FinishedNotice): FinishedNotice =
+        FinishedNotice(notice.title, "Unlock to see the details.")
 
     private fun title(state: AppUiState): String =
         if (state.audioName.isBlank()) "Transcribing voice note" else "Transcribing ${state.audioName}"

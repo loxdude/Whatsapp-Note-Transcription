@@ -18,7 +18,9 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.core.content.ContextCompat
 import androidx.core.content.IntentCompat
 import com.local.voicenotes.history.HistoryEntry
+import com.local.voicenotes.share.isAcceptedShareScheme
 import com.local.voicenotes.share.isShareableAudioType
+import android.widget.Toast
 import com.local.voicenotes.work.WorkNotifications
 import java.text.DateFormat
 import java.util.Date
@@ -159,6 +161,11 @@ class MainActivity : ComponentActivity() {
         val uri = IntentCompat.getParcelableExtra(intent, Intent.EXTRA_STREAM, Uri::class.java)
             ?: intent.clipData?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.uri
             ?: return
+        if (!isAcceptedShareScheme(uri.scheme)) {
+            // file:// and other schemes would be read with this app's own permissions.
+            Toast.makeText(this, "This share is not supported. Share the file from an app that provides it as content.", Toast.LENGTH_LONG).show()
+            return
+        }
         viewModel.onSharedAudio(uri)
         requestNotificationPermissionOnce()
     }
@@ -228,6 +235,7 @@ private fun TranscriberScreen(state: AppUiState, viewModel: AppViewModel, onWork
     var showSettings by rememberSaveable { mutableStateOf(false) }
     val clipboard = LocalClipboardManager.current
     val consentPrompt by viewModel.consentPrompt.collectAsStateWithLifecycle()
+    val shareHint by viewModel.shareHint.collectAsStateWithLifecycle()
     LaunchedEffect(consentPrompt) {
         // Shared audio for a cloud model waits for the same consent dialog as a tap.
         if (consentPrompt) {
@@ -284,6 +292,10 @@ private fun TranscriberScreen(state: AppUiState, viewModel: AppViewModel, onWork
                             else "Language: detected automatically",
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    shareHint?.let { hint ->
+                        Text(hint, style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary)
                     }
                     if (state.busy || state.progress !is TranscriptionProgress.Idle) {
                         ProgressArea(state)

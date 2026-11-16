@@ -8,6 +8,8 @@ import com.local.voicenotes.domain.LanguageOption
 import com.local.voicenotes.history.HistoryEntry
 import com.local.voicenotes.inference.MistralApiKeyStatus
 import com.local.voicenotes.share.SharedAudioDecision
+import com.local.voicenotes.share.SharedAutoStart
+import com.local.voicenotes.share.sharedAutoStart
 import com.local.voicenotes.share.decideSharedAudio
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -45,38 +47,63 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     /** Set when shared audio waits for upload consent; the UI shows the consent dialog. */
     val consentPrompt: StateFlow<Boolean> = mutableConsentPrompt.asStateFlow()
 
+    private val mutableShareHint = MutableStateFlow<String?>(null)
+    /** Shown on the main screen when shared audio was loaded but not transcribed automatically. */
+    val shareHint: StateFlow<String?> = mutableShareHint.asStateFlow()
+
     private var shareJob: Job? = null
 
     fun refreshModels() = coordinator.refreshModels()
 
     fun setAudio(uri: Uri, persist: Boolean = true) {
         shareJob?.cancel()
+        mutableShareHint.value = null
         graph.setAudio(uri, persist)
     }
 
     /**
-     * Loads audio shared from another app and starts transcribing it once the model list is
-     * loaded and no preparation is running. Starting right away (while the receiving
-     * activity, and with it the temporary read grant, is alive) matters: the audio is read
-     * at transcription start. Cloud models still require consent: the dialog is requested
-     * instead of uploading. Without a usable model the audio is only loaded.
+     * Loads audio shared from another app (called by the activity, i.e. while visible) and
+     * starts transcribing it once the model list is loaded and no import or preparation
+     * runs. The foreground service is started right away, from the foreground, and held for
+     * the share until then, so the transcription stays protected if the user leaves
+     * meanwhile. If the app is in the background by then and the service is not running
+     * (its start was refused or it was stopped), the transcription is not started (it would
+     * run unprotected and its service start would be refused): the audio stays loaded and
+     * [shareHint] asks the user to start it. Cloud models still require consent: the dialog
+     * is requested instead of uploading. Without a usable model the audio is only loaded.
      */
     fun onSharedAudio(uri: Uri) {
         shareJob?.cancel()
         mutableShowHistory.value = false
+        mutableShareHint.value = null
         val source = uri.toString()
+        val releaseService = graph.reserveWorkServiceForShare()
         shareJob = viewModelScope.launch {
-            graph.setAudio(uri, persist = true).join()
+            // Temporary grant: not persisted, the previously picked audio stays remembered.
+            graph.setAudio(uri, persist = false).join()
             graph.initialRefresh.join()
             val decision = state
                 .map { decideSharedAudio(it, source, cloudUploadConsent.value) }
                 .first { it != SharedAudioDecision.WAIT }
             when (decision) {
-                SharedAudioDecision.TRANSCRIBE -> transcribe()
+                SharedAudioDecision.TRANSCRIBE -> startSharedTranscription()
                 SharedAudioDecision.NEEDS_CONSENT -> mutableConsentPrompt.value = true
                 SharedAudioDecision.ABORT, SharedAudioDecision.NO_USABLE_MODEL,
                 SharedAudioDecision.WAIT -> Unit
             }
+        }.also { job ->
+            // After the transcription started (it then keeps the service) or the share ended.
+            job.invokeOnCompletion { releaseService() }
+        }
+    }
+
+    private fun startSharedTranscription() {
+        val app = getApplication<VoiceNotesApplication>()
+        when (sharedAutoStart(app.isInForeground, graph.workServiceInForeground)) {
+            SharedAutoStart.START -> transcribe()
+            SharedAutoStart.START_IN_RUNNING_SERVICE -> startTranscription(startService = false)
+            SharedAutoStart.HINT_ONLY ->
+                mutableShareHint.value = "Shared audio is loaded. Tap Transcribe to start."
         }
     }
 
@@ -103,11 +130,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
      * Starts a transcription. Cloud models never upload without the user's recorded consent;
      * the UI asks first, this is the enforcement point.
      */
-    fun transcribe(): Boolean {
+    fun transcribe(): Boolean = startTranscription(startService = true)
+
+    /**
+     * [startService] must only be true while the app is visible (a user's tap, or a share
+     * whose app is still visible): background foreground-service starts are refused.
+     */
+    private fun startTranscription(startService: Boolean): Boolean {
         if (state.value.selectedModel?.isCloud() == true && !cloudUploadConsent.value) return false
         val started = coordinator.transcribe()
-        // Called synchronously from the user's tap (or the share), i.e. while visible.
-        if (started) graph.startWorkService()
+        if (started) mutableShareHint.value = null
+        if (started && startService) graph.startWorkService()
         return started
     }
 

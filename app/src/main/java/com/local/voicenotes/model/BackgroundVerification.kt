@@ -113,6 +113,10 @@ class BackgroundVerification(
  * only returned once its verification succeeded. If it failed (or was cancelled by someone
  * else, e.g. backend close), [onUnverified] discards the unverified state and the work is
  * re-run exactly once via `attempt(true)`, which must use a fully verified path.
+ *
+ * The same applies when the first attempt *throws* (e.g. inference failing on corrupt bytes)
+ * while [pendingVerification] reports a check: the error is only surfaced if the bytes turn
+ * out to be verified; otherwise the attempt is re-run on the verified path.
  */
 object VerifiedResultGate {
     class Attempt<T>(val value: T, val verification: BackgroundVerification?)
@@ -124,11 +128,30 @@ object VerifiedResultGate {
         noinline checkCancelled: () -> Unit,
         onUnverified: (BackgroundVerification.Outcome) -> Unit,
         noinline onAwaited: (BackgroundVerification.Outcome, Long) -> Unit = { _, _ -> },
+        /**
+         * The verification gating the bytes the first attempt used, if any; consulted only
+         * when that attempt threw. Typically the attempt records it before computing.
+         */
+        noinline pendingVerification: () -> BackgroundVerification? = { null },
         attempt: (retry: Boolean) -> Attempt<T>
     ): T {
-        val first = attempt(false)
-        val firstOutcome = awaitVerified(first.verification, checkCancelled, onAwaited)
-            ?: return first.value
+        var failure: Throwable? = null
+        val first = try {
+            attempt(false)
+        } catch (error: Throwable) {
+            if (!retriesAfterFailure(error)) throw error
+            failure = error
+            null
+        }
+        val firstOutcome = if (first != null) {
+            awaitVerified(first.verification, checkCancelled, onAwaited) ?: return first.value
+        } else {
+            val error = failure!!
+            val pending = pendingVerification() ?: throw error
+            // Corrupt bytes may be the cause: decide by the verification, not by the error.
+            // Verified bytes mean the error is genuine and is reported unchanged.
+            awaitVerified(pending, checkCancelled, onAwaited) ?: throw error
+        }
         onUnverified(firstOutcome)
         val second = attempt(true)
         val secondOutcome = awaitVerified(second.verification, checkCancelled, onAwaited)
@@ -136,6 +159,11 @@ object VerifiedResultGate {
         onUnverified(secondOutcome)
         throw UnverifiedResultException("The model file could not be verified. Re-import it.")
     }
+
+    /** Cancellation (coroutine or thread interruption) and fatal VM errors are never retried. */
+    @PublishedApi internal fun retriesAfterFailure(error: Throwable): Boolean =
+        error !is java.util.concurrent.CancellationException && error !is InterruptedException &&
+            error !is VirtualMachineError && error !is UnverifiedResultException
 
     /** Null when the result may be returned, otherwise the outcome that prevents it. */
     @PublishedApi internal fun awaitVerified(

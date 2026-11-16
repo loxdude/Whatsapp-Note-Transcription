@@ -123,9 +123,12 @@ class LiteRtParakeetBackend internal constructor(
         activeCall = callJob
         try {
             val totalStarted = SystemClock.elapsedRealtimeNanos()
+            // Verification gating the session of the first attempt; consulted if it throws.
+            var firstVerification: BackgroundVerification? = null
             // A result is only returned once the bytes it was computed from are verified; a
             // failed background verification discards the session and re-runs once on a
-            // session from the full (re-hashing) path.
+            // session from the full (re-hashing) path. An error thrown while the check is
+            // pending is only reported if the bytes turn out to be verified.
             VerifiedResultGate.run(
                 checkCancelled = { callJob.ensureActive() },
                 onUnverified = { outcome ->
@@ -134,12 +137,14 @@ class LiteRtParakeetBackend internal constructor(
                 },
                 onAwaited = { outcome, waitMillis ->
                     Log.i(TAG, "result gated on verification outcome=$outcome wait=${waitMillis}ms")
-                }
+                },
+                pendingVerification = { firstVerification }
             ) { retry ->
                 // A cheap provider stamp decides whether the prepared session may be reused
                 // as-is; a changed or unavailable stamp forces a full content re-verification.
                 val verify = retry || sourceMayHaveChanged(model)
                 val prepared = sessionFor(model, verifySource = verify, allowFastPath = !retry) { callJob.ensureActive() }
+                if (!retry) firstVerification = prepared.verification
                 Log.i(
                     TAG,
                     "reusePreparedSession=${!verify} retry=$retry verificationPending=${prepared.verification != null} " +

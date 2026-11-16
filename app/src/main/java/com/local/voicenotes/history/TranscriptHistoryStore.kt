@@ -2,7 +2,9 @@ package com.local.voicenotes.history
 
 import java.io.File
 import java.io.FileOutputStream
+import java.nio.channels.FileChannel
 import java.nio.file.Files
+import java.nio.file.StandardOpenOption
 import java.nio.file.StandardCopyOption
 
 /** One completed transcription as shown in the history list. */
@@ -117,9 +119,7 @@ class TranscriptHistoryStore(
             output.fd.sync()
         }
         if (file.exists()) {
-            runCatching {
-                Files.copy(file.toPath(), backupFile.toPath(), StandardCopyOption.REPLACE_EXISTING)
-            }.onFailure { log("Backing up transcript history failed: ${it.message}") }
+            runCatching { backUp() }.onFailure { log("Backing up transcript history failed: ${it.message}") }
         }
         try {
             Files.move(
@@ -129,6 +129,24 @@ class TranscriptHistoryStore(
         } catch (atomicUnsupported: java.nio.file.AtomicMoveNotSupportedException) {
             Files.move(tempFile.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING)
         }
+        // Makes the rename (and the backup) durable before the commit counts as done.
+        file.parentFile?.let(::syncDirectory)
+    }
+
+    /** Copies the current main file to `.bak` and syncs it, so the backup survives a crash. */
+    private fun backUp() {
+        file.inputStream().use { input ->
+            FileOutputStream(backupFile).use { output ->
+                input.copyTo(output)
+                output.flush()
+                output.fd.sync()
+            }
+        }
+    }
+
+    /** Not supported on every filesystem; harmless then (the previous commit stays readable). */
+    private fun syncDirectory(directory: File) {
+        runCatching { FileChannel.open(directory.toPath(), StandardOpenOption.READ).use { it.force(true) } }
     }
 
     private fun load(): List<HistoryEntry> {

@@ -59,6 +59,52 @@ class TranscriptHistoryTest {
         assertTrue(newStore().entries().isEmpty())
     }
 
+    @Test fun blankTranscriptIsListedOnceTheUserEditsTextIntoIt() {
+        val history = TranscriptHistory(newStore(), editDelayMillis = 60_000)
+        history.add(NewHistoryEntry("blank", "b.ogg", "Parakeet", "", audioDurationMillis = 900))
+        history.awaitIdle()
+        assertTrue("no speech recognized: not listed", history.entries.value.isEmpty())
+
+        history.updateText("blank", "   ")
+        history.flush()
+        history.awaitIdle()
+        assertTrue("whitespace still counts as blank", history.entries.value.isEmpty())
+
+        history.updateText("blank", "typed by the user")
+        history.flush()
+        history.awaitIdle()
+        val entry = history.entries.value.single()
+        assertEquals("blank", entry.id)
+        assertEquals("typed by the user", entry.text)
+        assertEquals(900L, entry.audioDurationMillis)
+        assertEquals("typed by the user", newStore().entries().single().text)
+
+        // Later edits update the now-listed entry as usual.
+        history.updateText("blank", "edited again")
+        history.flush()
+        history.awaitIdle()
+        assertEquals("edited again", newStore().entries().single().text)
+    }
+
+    @Test fun deletedBlankTranscriptIsNotResurrectedByALateEdit() {
+        val history = TranscriptHistory(newStore(), editDelayMillis = 60_000)
+        history.add(NewHistoryEntry("blank", "b.ogg", "Parakeet", ""))
+        history.delete("blank")
+        history.updateText("blank", "text")
+        history.flush()
+        history.awaitIdle()
+        assertTrue(history.entries.value.isEmpty())
+    }
+
+    @Test fun commitKeepsASyncedBackupOfThePreviousFile() {
+        val store = newStore()
+        store.add(draft("a"))
+        store.add(draft("b"))
+        val backup = File(folder.root, "h.json.bak")
+        assertTrue(backup.exists())
+        assertEquals(listOf("a"), TranscriptHistoryStore(backup, clock = { 0 }).entries().map { it.id })
+    }
+
     @Test fun loadsExistingFileOnStart() {
         newStore().add(draft("old"))
         val history = TranscriptHistory(newStore())

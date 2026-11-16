@@ -20,8 +20,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Process-scoped dependencies. The coordinator, its scope and the backends live as long as
@@ -76,16 +81,15 @@ class AppGraph(private val app: VoiceNotesApplication) {
         ),
         log = ::log,
         // History is written here, not from Compose, so it is saved even without any UI.
+        // A blank transcript is only listed once the user edits text into it.
         onTranscriptCompleted = { done ->
-            if (done.text.isNotBlank()) {
-                history.add(
-                    NewHistoryEntry(
-                        id = done.id, audioName = done.audioName, modelName = done.modelName,
-                        text = done.text, audioDurationMillis = done.audioDurationMillis,
-                        processingMillis = done.processingMillis
-                    )
+            history.add(
+                NewHistoryEntry(
+                    id = done.id, audioName = done.audioName, modelName = done.modelName,
+                    text = done.text, audioDurationMillis = done.audioDurationMillis,
+                    processingMillis = done.processingMillis
                 )
-            }
+            )
         },
         onTranscriptEdited = history::updateText
     )
@@ -109,14 +113,15 @@ class AppGraph(private val app: VoiceNotesApplication) {
     }
 
     /**
-     * Selects [uri] as the audio. With [persist], tries to keep read access across restarts.
+     * Selects [uri] as the audio. With [persist] (picker URIs from OpenDocument, which grant
+     * persistable access) the grant is taken and the audio is remembered for the next launch;
+     * the previous picked audio's grant is released.
      *
-     * Picker URIs (OpenDocument) grant persistable access. URIs shared from other apps carry
-     * only a temporary grant; taking a persistable grant throws SecurityException then. Such
-     * audio is used for this session only: it is not remembered for the next launch and no
-     * grant is released for it later. The temporary grant may end with the receiving
-     * activity, which is acceptable because the audio is read when a transcription starts
-     * (local decoding opens the file, Mistral copies it to a staging file first).
+     * Audio shared from other apps uses `persist = false`: it carries only a temporary grant,
+     * so it is used for this session only, and the previously picked audio stays remembered
+     * with its grant untouched. The temporary grant may end with the receiving activity,
+     * which is acceptable because the audio is read when a transcription starts (local
+     * decoding opens the file, Mistral copies it to a staging file first).
      */
     fun setAudio(uri: Uri, persist: Boolean): Job = scope.launch(audioDispatcher) {
         val resolver = app.contentResolver
@@ -155,9 +160,31 @@ class AppGraph(private val app: VoiceNotesApplication) {
      * Starts the foreground service for a just-started import or transcription. Must be
      * called from a user action while the app is visible (background FGS starts are denied).
      */
-    fun startWorkService() {
-        if (!TranscriptionService.start(app)) {
-            log("Foreground service could not start; work continues without it.")
-        }
+    fun startWorkService(): Boolean {
+        val started = TranscriptionService.start(app)
+        if (!started) log("Foreground service could not start; work continues without it.")
+        return started
+    }
+
+    /** True while the work service runs in the foreground. Main thread; set by the service. */
+    @Volatile var workServiceInForeground = false
+
+    private val mutableShareReservations = MutableStateFlow(0)
+    /** Number of shares waiting for their automatic transcription; the service stays while > 0. */
+    val shareReservations: StateFlow<Int> = mutableShareReservations.asStateFlow()
+
+    /**
+     * Called when audio is shared to the app, i.e. while it is visible: starts the work
+     * service now (a later start, once the model list is loaded and prepared, may already be
+     * in the background and be refused) and keeps it running until the returned release
+     * function is called (idempotent). Release it only after the transcription started, so
+     * the service carries straight over into the transcription.
+     */
+    fun reserveWorkServiceForShare(): () -> Unit {
+        mutableShareReservations.update { it + 1 }
+        val released = AtomicBoolean()
+        val release = { if (released.compareAndSet(false, true)) mutableShareReservations.update { it - 1 } }
+        if (!startWorkService()) release()
+        return release
     }
 }

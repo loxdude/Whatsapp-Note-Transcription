@@ -28,12 +28,31 @@ class TranscriptHistory(
     private val editLock = Any()
     private val pendingEdits = LinkedHashMap<String, String>() // guarded by editLock
     private var scheduledFlush: ScheduledFuture<*>? = null      // guarded by editLock
+    /**
+     * Completed transcriptions whose text was blank (no speech recognized). They are not
+     * listed, but kept so the entry is added once the user types a transcript for them.
+     * Executor thread only.
+     */
+    private val blankDrafts = LinkedHashMap<String, NewHistoryEntry>()
 
     init {
         submit { }
     }
 
-    fun add(draft: NewHistoryEntry) = submit { store.add(draft) }
+    /**
+     * Adds a completed transcription. A blank one is not listed yet; it is added as soon as an
+     * edit gives it text (see [updateText]).
+     */
+    fun add(draft: NewHistoryEntry) = submit {
+        if (draft.text.isBlank()) {
+            blankDrafts.remove(draft.id)
+            blankDrafts[draft.id] = draft
+            while (blankDrafts.size > MAX_BLANK_DRAFTS) blankDrafts.remove(blankDrafts.keys.first())
+        } else {
+            blankDrafts.remove(draft.id)
+            store.add(draft)
+        }
+    }
 
     /** Records an edit of entry [id]; persisted after a short delay or on [flush]. */
     fun updateText(id: String, text: String) {
@@ -50,6 +69,7 @@ class TranscriptHistory(
 
     fun delete(id: String) = submit {
         synchronized(editLock) { pendingEdits.remove(id) }
+        blankDrafts.remove(id)
         store.delete(id)
     }
 
@@ -64,7 +84,23 @@ class TranscriptHistory(
             scheduledFlush = null
             LinkedHashMap(pendingEdits).also { pendingEdits.clear() }
         }
-        if (edits.isNotEmpty()) store.updateTexts(edits)
+        if (edits.isEmpty()) return
+        // Edits that give a blank transcription its first text create its entry.
+        val remaining = LinkedHashMap<String, String>()
+        edits.forEach { (id, text) ->
+            val blank = blankDrafts[id]
+            if (blank != null && text.isNotBlank()) {
+                blankDrafts.remove(id)
+                store.add(blank.copy(text = text))
+            } else if (blank == null) {
+                remaining[id] = text
+            }
+        }
+        if (remaining.isNotEmpty()) store.updateTexts(remaining)
+    }
+
+    private companion object {
+        const val MAX_BLANK_DRAFTS = 8
     }
 
     private fun submit(block: () -> Unit) {

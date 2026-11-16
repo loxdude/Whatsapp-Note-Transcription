@@ -144,6 +144,59 @@ class VerifiedResultGateTest {
         assertEquals(Outcome.VERIFIED, outcome)
     }
 
+    @Test fun errorOfFirstAttemptWhileVerificationPendingIsRetriedWhenTheBytesFailVerification() {
+        val release = CountDownLatch(1)
+        val pending = verification { release.await(5, TimeUnit.SECONDS); false }
+        val attempts = mutableListOf<Boolean>()
+        val unverified = mutableListOf<Outcome>()
+        var used: BackgroundVerification? = null
+        Thread { Thread.sleep(100); release.countDown() }.start()
+        val text = VerifiedResultGate.run({}, { unverified += it }, pendingVerification = { used }) { retry ->
+            attempts += retry
+            if (!retry) {
+                used = pending
+                throw IllegalStateException("native inference failed on corrupt bytes")
+            }
+            VerifiedResultGate.Attempt("from verified bytes", null)
+        }
+        assertEquals("from verified bytes", text)
+        assertEquals(listOf(false, true), attempts)
+        assertEquals(listOf(Outcome.FAILED), unverified)
+    }
+
+    @Test fun errorOfFirstAttemptOnVerifiedBytesIsRethrownUnchanged() {
+        val original = IllegalStateException("genuine failure")
+        val attempts = mutableListOf<Boolean>()
+        try {
+            VerifiedResultGate.run<String>({}, { fail("bytes were verified") }, pendingVerification = { verification { true } }) { retry ->
+                attempts += retry
+                throw original
+            }
+            fail("expected the original error")
+        } catch (error: IllegalStateException) {
+            assertTrue(error === original)
+        }
+        assertEquals(listOf(false), attempts)
+    }
+
+    @Test fun errorWithoutPendingVerificationOrOnCancellationIsNotRetried() {
+        val attempts = AtomicInteger()
+        try {
+            VerifiedResultGate.run<String>({}, { fail("no verification") }) { attempts.incrementAndGet(); throw IllegalStateException("x") }
+            fail("expected an error")
+        } catch (_: IllegalStateException) {
+        }
+        try {
+            VerifiedResultGate.run<String>({}, { fail("cancellation is not retried") },
+                pendingVerification = { verification { false } }) {
+                attempts.incrementAndGet(); throw java.util.concurrent.CancellationException("cancelled")
+            }
+            fail("expected cancellation")
+        } catch (_: java.util.concurrent.CancellationException) {
+        }
+        assertEquals(2, attempts.get())
+    }
+
     private class Stop : RuntimeException()
 
     /** Runs until cancelled (bounded to keep a broken test from hanging forever). */

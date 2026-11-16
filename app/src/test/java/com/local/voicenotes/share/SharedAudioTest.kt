@@ -69,4 +69,19 @@ class SharedAudioTest {
         assertFalse(isShareableAudioType("image/jpeg"))
         assertFalse(isShareableAudioType("text/plain"))
     }
+
+    @Test fun onlyContentUrisAreAcceptedFromShares() {
+        assertTrue(isAcceptedShareScheme("content"))
+        assertTrue(isAcceptedShareScheme("CONTENT"))
+        assertFalse(isAcceptedShareScheme("file"))
+        assertFalse(isAcceptedShareScheme("http"))
+        assertFalse(isAcceptedShareScheme(null))
+    }
+
+    @Test fun autoStartOnlyFromTheForegroundOrInsideTheReservedService() {
+        assertEquals(SharedAutoStart.START, sharedAutoStart(appVisible = true, serviceInForeground = false))
+        assertEquals(SharedAutoStart.START, sharedAutoStart(appVisible = true, serviceInForeground = true))
+        assertEquals(SharedAutoStart.START_IN_RUNNING_SERVICE, sharedAutoStart(appVisible = false, serviceInForeground = true))
+        assertEquals(SharedAutoStart.HINT_ONLY, sharedAutoStart(appVisible = false, serviceInForeground = false))
+    }
 }

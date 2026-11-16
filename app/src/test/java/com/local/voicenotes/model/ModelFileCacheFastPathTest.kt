@@ -214,7 +214,53 @@ class ModelFileCacheFastPathTest {
             fail("expected cancellation")
         } catch (_: Stop) {
         }
-        assertNotNull("cancellation keeps the record", recorded(source))
+        assertEquals("cancellation keeps the record", 1, recordFiles().size)
+        // ...but the fast path stays marked as unverified, so it is not taken again.
+        assertNull(recorded(source))
+    }
+
+    @Test fun fastPathThatNeverFinishedVerificationIsNotTakenOnTheNextColdStart() {
+        val source = Source(modelBytes(1), stamp = "s")
+        fullAcquire(source)
+        val fast = recorded(source)
+        assertNotNull(fast)
+        assertTrue("marker is persisted before the caller builds a session", cache().fastPathMarked(source))
+        // The process dies here (e.g. native code crashed on the unverified bytes): no verify().
+
+        val opens = source.opens.get()
+        assertNull("next cold start must take the full path", recorded(source))
+        assertEquals("declining the fast path reads nothing", opens, source.opens.get())
+        assertEquals("the record itself is kept", 1, recordFiles().size)
+
+        // The full path re-verifies and clears the marker, so later starts are fast again.
+        fullAcquire(source)
+        assertFalse(cache().fastPathMarked(source))
+        val again = recorded(source)
+        assertNotNull(again)
+        assertTrue(again!!.verify(pool))
+        assertFalse("a passed verification clears the marker", cache().fastPathMarked(source))
+        assertNotNull(recorded(source))
+    }
+
+    @Test fun failedVerificationKeepsTheMarkerUntilTheFullPathRepairsTheCopy() {
+        val source = Source(modelBytes(1), stamp = "s")
+        fullAcquire(source)
+        val fast = recorded(source)!!
+        source.onOpen = { throw IllegalStateException("provider crashed") }
+        assertFalse(fast.verify(pool))
+        assertTrue(cache().fastPathMarked(source))
+        source.onOpen = {}
+        fullAcquire(source)
+        assertFalse(cache().fastPathMarked(source))
+    }
+
+    @Test fun backgroundVerificationThatPassesClearsTheMarker() {
+        val source = Source(modelBytes(1), stamp = "s")
+        fullAcquire(source)
+        val fast = recorded(source)!!
+        assertEquals(BackgroundVerification.Outcome.VERIFIED, fast.startVerification(pool).await())
+        assertFalse(cache().fastPathMarked(source))
+        assertNotNull(recorded(source))
     }
 
     @Test fun failingSourceDuringVerificationCountsAsFailedVerification() {

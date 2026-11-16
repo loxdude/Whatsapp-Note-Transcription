@@ -11,6 +11,7 @@ import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executor
@@ -30,6 +31,11 @@ import java.util.concurrent.locks.ReentrantLock
  *  - `refs/<sha256(key)>`: the digest last resolved for a source key (cleanup only).
  *  - `records/<sha256(key)>`: "verified record" written after a full verification: digest,
  *    source stamp and blob length/mtime. Only a hint for [acquireRecorded]; never proof.
+ *  - `fastpath/<sha256(key)>`: "fast path in flight" marker, written durably by [acquireRecorded]
+ *    before the caller builds anything from the unverified blob and removed once that blob
+ *    was verified (or the key was fully re-resolved). A marker left behind means the process
+ *    died with unverified bytes in use (possibly crashing on them), so the next
+ *    [acquireRecorded] for the key declines and the caller takes the full path.
  *  - `tmp/`: in-flight copies with unique names; deleted on failure and, as leftovers
  *    of killed processes, at the start of the next resolution.
  *
@@ -85,6 +91,7 @@ class ModelFileCache(
     private val blobs = File(root, "blobs")
     private val refs = File(root, "refs")
     private val records = File(root, "records")
+    private val fastPathMarkers = File(root, "fastpath")
     private val tmp = File(root, "tmp")
     private val lockFile = File(root, ".lock")
 
@@ -135,6 +142,8 @@ class ModelFileCache(
                 if (digest != previous) writeRef(refFile, digest)
                 val stamp = stampBefore?.takeIf { it == source.stamp() }
                 updateRecord(recordFile, digest, known, source.expectedSize, stamp, blobHashed = !trusted)
+                // Verified (or the caller's verified live blob): the fast path is safe again.
+                clearFastPathMarker(keyName)
                 return known
             }
         }
@@ -143,6 +152,7 @@ class ModelFileCache(
         val digest = blob.name.removeSuffix(BLOB_SUFFIX)
         writeRef(refFile, digest)
         updateRecord(recordFile, digest, blob, source.expectedSize, stamp, blobHashed = true)
+        clearFastPathMarker(keyName)
         return blob
     }
 
@@ -157,6 +167,11 @@ class ModelFileCache(
      * rewritten with identical size AND identical provider lastModified (or a blob modified
      * with its mtime restored) passes this check and is only caught by that verification,
      * which therefore has to gate every result.
+     *
+     * Before returning, a "fast path in flight" marker is persisted for the key; only a passed
+     * [RecordedBlob.verify] (or a full resolution) removes it. While it exists this returns
+     * null, so bytes that crash the process before their verification finished cannot be
+     * loaded by the fast path again on the next cold start.
      */
     fun acquireRecorded(source: Source, checkCancelled: () -> Unit = {}): RecordedBlob? {
         require(source.expectedSize > 0) { "The model has no recorded size." }
@@ -176,8 +191,19 @@ class ModelFileCache(
                 blob.length() == record.blobLength &&
                 blob.lastModified() == record.blobModified
             if (!usable) return@withDirectoryLock null
+            val marker = File(fastPathMarkers, keyName)
+            // An earlier fast path never got verified (e.g. the process died): full path.
+            if (marker.exists()) return@withDirectoryLock null
+            val token = UUID.randomUUID().toString()
+            // Must be durable before anything is built from the unverified bytes.
+            try {
+                writeAtomically(fastPathMarkers, marker, token)
+            } catch (error: IOException) {
+                marker.delete()
+                return@withDirectoryLock null
+            }
             synchronized(leases) { leases[blob.path] = (leases[blob.path] ?: 0) + 1 }
-            RecordedBlob(Lease(blob), record, recordText, recordFile, source)
+            RecordedBlob(Lease(blob), record, recordText, recordFile, source, marker, token)
         }
     }
 
@@ -190,7 +216,9 @@ class ModelFileCache(
         private val record: Record,
         private val recordText: String,
         private val recordFile: File,
-        private val source: Source
+        private val source: Source,
+        private val marker: File,
+        private val markerToken: String
     ) {
         val file: File get() = lease.file
         val digest: String get() = record.digest
@@ -200,7 +228,8 @@ class ModelFileCache(
         /**
          * Full check: the source currently hashes to [digest] (and its stamp did not change
          * meanwhile) AND the blob hashes to [digest]. The blob is hashed on [executor] while
-         * the source is hashed on the calling thread. On a mismatch or any error other than
+         * the source is hashed on the calling thread. On success the fast-path marker written
+         * by [acquireRecorded] is removed. On a mismatch or any error other than
          * cancellation the record is deleted (so the next cold start takes the full path) and
          * false is returned. Exceptions thrown by [checkCancelled] propagate unchanged and keep
          * the record. The caller must hold a lease on [file] for the duration.
@@ -250,7 +279,10 @@ class ModelFileCache(
                     if (cancelled.get() || error is VirtualMachineError) throw error
                     // Any other failure counts as failed verification.
                 }
-                if (sourceOk && blobOk) return true
+                if (sourceOk && blobOk) {
+                    clearMarker()
+                    return true
+                }
                 if (sourceOk) corruptBlobsDetected++
                 invalidateRecord()
                 return false
@@ -278,7 +310,20 @@ class ModelFileCache(
         fun invalidateRecord() {
             if (readText(recordFile) == recordText) recordFile.delete()
         }
+
+        /** Removes this fast path's marker, unless a newer fast path of the key owns it now. */
+        private fun clearMarker() {
+            if (readText(marker) == markerToken && marker.delete()) syncDirectory(fastPathMarkers)
+        }
     }
+
+    /** Must hold the directory lock. */
+    private fun clearFastPathMarker(keyName: String) {
+        if (File(fastPathMarkers, keyName).delete()) syncDirectory(fastPathMarkers)
+    }
+
+    /** Test/diagnostics hook: whether a fast path of [source] is marked as in flight. */
+    internal fun fastPathMarked(source: Source): Boolean = File(fastPathMarkers, keyName(source)).exists()
 
     private fun retain(lease: Lease): Lease {
         synchronized(leases) {

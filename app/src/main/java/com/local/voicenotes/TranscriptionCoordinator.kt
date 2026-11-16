@@ -220,14 +220,14 @@ class TranscriptionCoordinator(
      * Rejected while an import or transcription is running (the UI also disables it).
      */
     fun selectModel(id: String): Boolean {
-        val model = locked {
+        val preparation = locked {
             if (disposed || foregroundRunning()) return false
             val model = mutableState.value.models.firstOrNull { it.id == id && it.enabled } ?: return false
-            write { it.copy(selectedModelId = id) }
-            model
+            val select = { state: AppUiState -> state.copy(selectedModelId = id) }
+            prepareLocked(model, select) ?: run { write(select); null }
         }
         persistSelection(id)
-        prepare(model)
+        preparation?.start()
         return true
     }
 
@@ -264,15 +264,17 @@ class TranscriptionCoordinator(
             val current = mutableState.value.selectedModelId
             val selected = chooseSelection(models, current, saved)
             modelsVersion++
-            write { it.copy(models = models, selectedModelId = selected) }
+            val publish = { state: AppUiState -> state.copy(models = models, selectedModelId = selected) }
             // An import or transcription owns the progress; it will prepare when needed.
             // If any operation started, finished or was cancelled since the refresh began,
             // its terminal state (e.g. Cancelled) stays visible; the backend still prepares
             // lazily on the next transcription.
-            if (foregroundRunning() || generation != startGeneration) null
-            else models.firstOrNull { it.id == selected }
+            val preparation = if (foregroundRunning() || generation != startGeneration) null
+            else models.firstOrNull { it.id == selected }?.let { prepareLocked(it, publish) }
+            if (preparation == null) write(publish)
+            preparation
         }
-        toPrepare?.let(::prepare)
+        toPrepare?.start()
     }
 
     // ---- Import -----------------------------------------------------------------------
@@ -301,6 +303,11 @@ class TranscriptionCoordinator(
             val models = catalog.models()
             kotlin.coroutines.coroutineContext.ensureActive()
             val entry = models.firstOrNull { it.id == imported.id } ?: imported
+            // One locked step publishes the list, the selection and (for a usable model) the
+            // preparation's LoadingModel state. There is no transient Idle in between, so an
+            // observer (e.g. a pending share) can never start a transcription that the
+            // preparation would then supersede.
+            var preparation: Job? = null
             val accepted = locked {
                 if (token != generation) return@locked false
                 if (foregroundToken == token) {
@@ -310,9 +317,10 @@ class TranscriptionCoordinator(
                 val current = mutableState.value.selectedModelId
                 val selected = if (entry.enabled) entry.id else chooseSelection(models, current, saved = null)
                 modelsVersion++
-                write {
-                    it.copy(
-                        models = models, selectedModelId = selected,
+                val publish = { state: AppUiState -> state.copy(models = models, selectedModelId = selected) }
+                if (entry.enabled) preparation = prepareLocked(entry, publish)
+                if (preparation == null) write {
+                    publish(it).copy(
                         progress = if (entry.enabled) TranscriptionProgress.Idle
                         else TranscriptionProgress.Failed(entry.note.ifBlank { "This model cannot be used." })
                     )
@@ -321,7 +329,7 @@ class TranscriptionCoordinator(
             }
             if (accepted && entry.enabled) {
                 persistSelection(entry.id)
-                prepare(entry)
+                preparation?.start()
             }
         } catch (cancellation: CancellationException) {
             finishIfCurrent(token) { it.copy(progress = TranscriptionProgress.Cancelled) }
@@ -356,16 +364,24 @@ class TranscriptionCoordinator(
 
     // ---- Preparation ------------------------------------------------------------------
 
-    private fun prepare(model: ImportedModel) {
-        val job = locked {
-            if (disposed || mutableState.value.selectedModelId != model.id) return
-            prepareJob?.cancel(CancellationException("Model selection changed."))
-            val token = ++generation
-            write { it.copy(progress = TranscriptionProgress.LoadingModel) }
-            scope.launch(start = CoroutineStart.LAZY) { runPrepare(token, model) }
-                .also { prepareJob = it }
-        }
-        job.start()
+    /**
+     * Must be called while holding [lock]. Publishes [update] together with LoadingModel as ONE
+     * state (observers such as a pending share never see an intermediate Idle) and returns the
+     * lazy, not yet started preparation job. Returns null and writes nothing when nothing may
+     * be prepared: after disposal, when [model] would not be selected, or while an import or
+     * transcription runs. Preparation never supersedes running foreground work (that would
+     * invalidate its token and discard its result); a transcription prepares its model
+     * itself, lazily.
+     */
+    private fun prepareLocked(model: ImportedModel, update: (AppUiState) -> AppUiState = { it }): Job? {
+        val next = update(mutableState.value)
+        if (disposed || next.selectedModelId != model.id || foregroundRunning()) return null
+        // Retire the old token first, so the superseded preparation can no longer write.
+        val token = ++generation
+        prepareJob?.cancel(CancellationException("Model selection changed."))
+        mutableState.value = next.copy(progress = TranscriptionProgress.LoadingModel)
+        return scope.launch(start = CoroutineStart.LAZY) { runPrepare(token, model) }
+            .also { prepareJob = it }
     }
 
     private suspend fun runPrepare(token: Long, model: ImportedModel) {

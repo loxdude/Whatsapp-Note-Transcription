@@ -51,7 +51,14 @@ object WorkNotifications {
         )
     }
 
-    fun ongoing(context: Context, notice: OngoingNotice): Notification {
+    /** Private on the lock screen; the public version shows no file name. */
+    fun ongoing(context: Context, notice: OngoingNotice): Notification =
+        ongoingBuilder(context, notice)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setPublicVersion(ongoingBuilder(context, WorkNotificationPolicy.publicOngoing(notice)).build())
+            .build()
+
+    private fun ongoingBuilder(context: Context, notice: OngoingNotice): NotificationCompat.Builder {
         val cancel = PendingIntent.getBroadcast(
             context, 0, Intent(context, CancelWorkReceiver::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
@@ -69,19 +76,16 @@ object WorkNotifications {
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .setContentIntent(openAppIntent(context))
             .addAction(0, "Cancel", cancel)
-            .build()
     }
 
     /** Posts [notice] if the user allows notifications; silently does nothing otherwise. */
     fun postFinished(context: Context, notice: FinishedNotice) {
         if (!canPost(context)) return
-        val notification = NotificationCompat.Builder(context, CHANNEL_RESULTS)
-            .setSmallIcon(R.drawable.ic_stat_voice_note)
-            .setContentTitle(notice.title)
-            .setContentText(notice.text)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(notice.text))
-            .setAutoCancel(true)
-            .setContentIntent(openAppIntent(context))
+        // The text may be a transcript preview: private on the lock screen, whose public
+        // version carries neither transcript text nor a file name.
+        val notification = finishedBuilder(context, notice)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setPublicVersion(finishedBuilder(context, WorkNotificationPolicy.publicFinished(notice)).build())
             .build()
         try {
             NotificationManagerCompat.from(context).notify(FINISHED_ID, notification)
@@ -89,6 +93,15 @@ object WorkNotifications {
             // Permission revoked between the check and the call; nothing to show.
         }
     }
+
+    private fun finishedBuilder(context: Context, notice: FinishedNotice): NotificationCompat.Builder =
+        NotificationCompat.Builder(context, CHANNEL_RESULTS)
+            .setSmallIcon(R.drawable.ic_stat_voice_note)
+            .setContentTitle(notice.title)
+            .setContentText(notice.text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(notice.text))
+            .setAutoCancel(true)
+            .setContentIntent(openAppIntent(context))
 
     fun cancelFinished(context: Context) = NotificationManagerCompat.from(context).cancel(FINISHED_ID)
 
