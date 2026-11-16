@@ -89,7 +89,12 @@ internal class FakeCatalog(initial: List<ImportedModel>) : ModelCatalog {
     override suspend fun import(source: String, onProgress: (Float) -> Unit): ImportedModel = onImport(source, onProgress)
 }
 
-internal class Harness(scope: CoroutineScope) {
+internal class Harness(
+    scope: CoroutineScope,
+    onTranscriptCompleted: (CompletedTranscript) -> Unit = {},
+    onTranscriptEdited: (String, String) -> Unit = { _, _ -> }
+) {
+    private val ids = AtomicInteger()
     val catalog = FakeCatalog(listOf(MODEL_A, MODEL_B, MODEL_CLOUD))
     val local = FakeBackend()
     val cloud = FakeUriBackend()
@@ -105,7 +110,10 @@ internal class Harness(scope: CoroutineScope) {
         // The same backend under two keys mirrors the LiteRT CPU/QNN aliases in AppViewModel.
         backends = mapOf("local" to local, "local-alias" to local, "cloud" to cloud),
         monotonicMillis = { now.get() },
-        clockInterval = 5.milliseconds
+        clockInterval = 5.milliseconds,
+        newTranscriptId = { "t${ids.incrementAndGet()}" },
+        onTranscriptCompleted = onTranscriptCompleted,
+        onTranscriptEdited = onTranscriptEdited
     )
 
     val state: AppUiState get() = coordinator.state.value

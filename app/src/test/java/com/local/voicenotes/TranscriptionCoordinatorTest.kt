@@ -435,12 +435,16 @@ class TranscriptionCoordinatorTest {
             repeat(30) { iteration ->
                 val staleDone = CompletableDeferred<Unit>()
                 val staleRunning = CompletableDeferred<Unit>()
+                // Without this the stale worker could finish (and legitimately complete)
+                // before the test thread gets to cancel it.
+                val cancelIssued = CompletableDeferred<Unit>()
                 var call = 0
                 h.local.onTranscribe = { _, progress ->
                     if (++call == 1) {
                         // Ignores cancellation and keeps reporting progress from another thread.
                         kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable + kotlinx.coroutines.Dispatchers.IO) {
                             staleRunning.complete(Unit)
+                            cancelIssued.await()
                             repeat(2_000) { progress(it / 2_000f) }
                             staleDone.complete(Unit)
                             "stale $iteration"
@@ -450,6 +454,7 @@ class TranscriptionCoordinatorTest {
                 assertTrue(h.coordinator.transcribe())
                 staleRunning.await()
                 h.coordinator.cancel()
+                cancelIssued.complete(Unit)
                 assertTrue(h.state.isCancelled)
                 assertTrue(h.coordinator.transcribe())
                 val done = h.await { it.progress is TranscriptionProgress.Completed }

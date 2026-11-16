@@ -2,7 +2,15 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- INTERNET permission required for Mistral API -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Background transcription: foreground service with an ongoing notification.
+         mediaProcessing is used on API 35+, dataSync on API 31-34. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROCESSING" />
+    <!-- Requested at runtime on API 33+ before the first transcription; optional. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <application
+        android:name=".VoiceNotesApplication"
         android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:icon="@drawable/ic_launcher"
@@ -11,11 +19,27 @@
         android:theme="@style/Theme.VoiceNoteTranscriber">
         <activity
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:launchMode="singleTop">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- Share a voice note (WhatsApp sends audio/ogg or audio/opus; some apps use
+                 application/ogg). -->
+            <intent-filter android:label="Transcribe">
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="audio/*" />
+                <data android:mimeType="application/ogg" />
+            </intent-filter>
         </activity>
+        <service
+            android:name=".work.TranscriptionService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync|mediaProcessing" />
+        <receiver
+            android:name=".work.CancelWorkReceiver"
+            android:exported="false" />
     </application>
 </manifest>

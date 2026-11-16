@@ -24,6 +24,20 @@ The main screen now keeps the audio picker, current backend, language, progress,
 
 The screen stays awake while a transcription is running. A cancel button appears during active work.
 
+### Share to the app
+
+Voice notes can be shared from WhatsApp or any other app (`ACTION_SEND` with `audio/*` or `application/ogg`). The app loads the audio and starts transcribing as soon as the selected model is ready. A cloud model still asks for upload consent first; without a usable model the audio is only loaded.
+
+Shared files come with a temporary read permission that can end when the app's screen is closed. The audio is read when a transcription starts (local decoding opens it, the Mistral path copies it to a staging file), so the automatic start happens while that permission is valid. Shared audio is not remembered for the next launch.
+
+### History
+
+Every finished transcript is saved on the device (`files/transcript_history.json`, newest 100). Edits to the current transcript are saved to its history entry. The list button on the main screen opens the history, where entries can be copied, shared as text, or deleted. The file is written atomically with a `.bak` copy of the previous version; an unreadable file falls back to the backup or an empty history.
+
+### Background work
+
+Imports and transcriptions run in an app-wide coordinator, not in the screen. While work runs, a foreground service shows a progress notification with a Cancel action, so the work continues when the app is in the background or removed from recents. If it finishes while the app is not visible, a "Transcription finished" notification opens the app. On Android 13+ the notification permission is requested once, at the first transcription; everything works without it, only the notifications are hidden. The service type is `mediaProcessing` on Android 15 and `dataSync` on Android 12–14.
+
 ## Requirements
 
 | Item | Requirement |
@@ -148,8 +162,14 @@ You can provide files that the app process can read:
 
 ```text
 app/src/main/java/com/local/voicenotes/
-├── MainActivity.kt                 Compose screen and settings sheet
-├── AppViewModel.kt                 Selection, progress, cancellation, and backend routing
+├── MainActivity.kt                 Compose screens (main, settings, history) and share intents
+├── AppViewModel.kt                 Thin UI adapter over the app-scoped graph
+├── AppGraph.kt                     Process-wide coordinator, backends, history, audio grants
+├── VoiceNotesApplication.kt        Owns AppGraph; tracks foreground visibility
+├── TranscriptionCoordinator.kt     Import/prepare/transcribe state machine (pure Kotlin)
+├── history/                        Transcript history store (JSON file, atomic writes)
+├── share/SharedAudio.kt            Auto-transcribe rules for shared audio
+├── work/                           Foreground service, notifications, cancel receiver
 ├── audio/
 │   ├── AndroidAudioDecoder.kt      Android codec decoding and 16 kHz mono conversion
 │   └── ParakeetFeatureExtractor.kt Five-second Parakeet feature extraction

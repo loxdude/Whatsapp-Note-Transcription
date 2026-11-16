@@ -1,8 +1,25 @@
 package com.local.voicenotes
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.runtime.LaunchedEffect
+import androidx.core.content.ContextCompat
+import androidx.core.content.IntentCompat
+import com.local.voicenotes.history.HistoryEntry
+import com.local.voicenotes.share.isShareableAudioType
+import com.local.voicenotes.work.WorkNotifications
+import java.text.DateFormat
+import java.util.Date
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -80,15 +97,80 @@ import androidx.compose.material3.IconButton
 import java.util.Locale
 
 class MainActivity : ComponentActivity() {
+    companion object {
+        /** Marks a share intent as handled so it is not processed twice by this instance. */
+        private const val EXTRA_SHARE_CONSUMED = "com.local.voicenotes.SHARE_CONSUMED"
+        private const val NOTIFICATION_PERMISSION_ASKED = "notification_permission_asked"
+    }
+
     private val viewModel: AppViewModel by viewModels()
+
+    /** The result does not matter: work runs either way, only notifications are hidden. */
+    private val notificationPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // A recreated activity (rotation, process restore) gets the original intent again;
+        // only a fresh launch may act on a share.
+        if (savedInstanceState == null) handleShareIntent(intent)
         setContent {
             val state by viewModel.state.collectAsStateWithLifecycle()
+            val showHistory by viewModel.showHistory.collectAsStateWithLifecycle()
             KeepScreenOn(state.busy)
-            AppTheme { TranscriberScreen(state, viewModel) }
+            AppTheme {
+                if (showHistory) {
+                    val entries by viewModel.history.collectAsStateWithLifecycle()
+                    HistoryScreen(entries, onClose = { viewModel.setShowHistory(false) },
+                        onDelete = viewModel::deleteHistoryEntry)
+                } else {
+                    TranscriberScreen(state, viewModel, onWorkStarted = ::requestNotificationPermissionOnce)
+                }
+            }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleShareIntent(intent)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        // The user is looking at the result now.
+        WorkNotifications.cancelFinished(this)
+    }
+
+    override fun onStop() {
+        viewModel.flushHistory()
+        super.onStop()
+    }
+
+    private fun handleShareIntent(intent: Intent?) {
+        if (intent == null || intent.action != Intent.ACTION_SEND) return
+        if (intent.getBooleanExtra(EXTRA_SHARE_CONSUMED, false)) return
+        // Relaunch from recents replays the original share; its temporary grant is gone.
+        if (intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0) return
+        intent.putExtra(EXTRA_SHARE_CONSUMED, true)
+        if (!isShareableAudioType(intent.type)) return
+        val uri = IntentCompat.getParcelableExtra(intent, Intent.EXTRA_STREAM, Uri::class.java)
+            ?: intent.clipData?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.uri
+            ?: return
+        viewModel.onSharedAudio(uri)
+        requestNotificationPermissionOnce()
+    }
+
+    /** Asks for POST_NOTIFICATIONS once (API 33+), when the first transcription starts. */
+    private fun requestNotificationPermissionOnce() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+        ) return
+        val preferences = getSharedPreferences("privacy", 0)
+        if (preferences.getBoolean(NOTIFICATION_PERMISSION_ASKED, false)) return
+        preferences.edit().putBoolean(NOTIFICATION_PERMISSION_ASKED, true).apply()
+        notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 }
 
@@ -115,7 +197,7 @@ private fun AppTheme(content: @Composable () -> Unit) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun TranscriberScreen(state: AppUiState, viewModel: AppViewModel) {
+private fun TranscriberScreen(state: AppUiState, viewModel: AppViewModel, onWorkStarted: () -> Unit) {
     val audioPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(viewModel::setAudio)
     }
@@ -128,6 +210,14 @@ private fun TranscriberScreen(state: AppUiState, viewModel: AppViewModel) {
     val cloudSelected = state.selectedModel?.backend == "mistral-api"
     var showSettings by rememberSaveable { mutableStateOf(false) }
     val clipboard = LocalClipboardManager.current
+    val consentPrompt by viewModel.consentPrompt.collectAsStateWithLifecycle()
+    LaunchedEffect(consentPrompt) {
+        // Shared audio for a cloud model waits for the same consent dialog as a tap.
+        if (consentPrompt) {
+            showCloudConsent = true
+            viewModel.consentPromptShown()
+        }
+    }
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(
             modifier = Modifier.fillMaxSize().safeDrawingPadding().imePadding()
@@ -137,6 +227,9 @@ private fun TranscriberScreen(state: AppUiState, viewModel: AppViewModel) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text("Voice notes", modifier = Modifier.weight(1f),
                     style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                IconButton(onClick = { viewModel.setShowHistory(true) }) {
+                    Icon(Icons.AutoMirrored.Filled.List, contentDescription = "Transcript history")
+                }
                 IconButton(onClick = { showSettings = true }) {
                     Icon(Icons.Default.Settings, contentDescription = "Transcription settings")
                 }
@@ -177,7 +270,7 @@ private fun TranscriberScreen(state: AppUiState, viewModel: AppViewModel) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(onClick = {
                                 if (cloudSelected && !cloudConsent) showCloudConsent = true
-                                else viewModel.transcribe()
+                                else if (viewModel.transcribe()) onWorkStarted()
                             }, enabled = state.canTranscribe,
                             modifier = Modifier.weight(1f).height(48.dp)) {
                             Text(if (state.busy) "Working..." else if (state.transcript.isNotBlank()) "Transcribe again" else "Transcribe")
@@ -303,7 +396,7 @@ private fun TranscriberScreen(state: AppUiState, viewModel: AppViewModel) {
                 Button(onClick = {
                     showCloudConsent = false
                     viewModel.grantCloudUploadConsent()
-                    viewModel.transcribe()
+                    if (viewModel.transcribe()) onWorkStarted()
                 }) { Text("Upload and transcribe") }
             },
             dismissButton = {
@@ -457,4 +550,95 @@ private fun MistralProgressIndicator(modifier: Modifier = Modifier) {
 private fun formatElapsed(millis: Long): String {
     val seconds = millis / 1000
     return String.format(Locale.ROOT, "%d:%02d", seconds / 60, seconds % 60)
+}
+
+@Composable
+private fun HistoryScreen(entries: List<HistoryEntry>, onClose: () -> Unit, onDelete: (String) -> Unit) {
+    BackHandler(onBack = onClose)
+    val clipboard = LocalClipboardManager.current
+    val context = LocalContext.current
+    var pendingDelete by rememberSaveable { mutableStateOf<String?>(null) }
+    Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+        Column(
+            modifier = Modifier.fillMaxSize().safeDrawingPadding().padding(horizontal = 20.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onClose) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                }
+                Text("History", modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            }
+            if (entries.isEmpty()) {
+                Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surface,
+                    modifier = Modifier.fillMaxWidth()) {
+                    Text("Finished transcripts appear here. The newest 100 are kept on this device.",
+                        modifier = Modifier.padding(16.dp), style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxWidth().weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    contentPadding = PaddingValues(bottom = 8.dp)
+                ) {
+                    items(entries, key = { it.id }) { entry ->
+                        HistoryCard(
+                            entry,
+                            onCopy = { clipboard.setText(AnnotatedString(entry.text)) },
+                            onShare = {
+                                val send = Intent(Intent.ACTION_SEND).setType("text/plain")
+                                    .putExtra(Intent.EXTRA_TEXT, entry.text)
+                                    .putExtra(Intent.EXTRA_SUBJECT, entry.audioName)
+                                context.startActivity(Intent.createChooser(send, "Share transcript"))
+                            },
+                            onDelete = { pendingDelete = entry.id }
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    pendingDelete?.let { id ->
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { pendingDelete = null },
+            title = { Text("Delete transcript?") },
+            text = { Text("This removes the transcript from the history on this device.") },
+            confirmButton = {
+                Button(onClick = { onDelete(id); pendingDelete = null }) { Text("Delete") }
+            },
+            dismissButton = { TextButton(onClick = { pendingDelete = null }) { Text("Cancel") } }
+        )
+    }
+}
+
+@Composable
+private fun HistoryCard(entry: HistoryEntry, onCopy: () -> Unit, onShare: () -> Unit, onDelete: () -> Unit) {
+    var expanded by rememberSaveable(entry.id) { mutableStateOf(false) }
+    Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surface,
+        modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(start = 16.dp, end = 8.dp, top = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(entry.audioName.ifBlank { "Voice note" }, style = MaterialTheme.typography.titleSmall,
+                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(end = 8.dp))
+            val details = listOfNotNull(
+                DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(entry.createdAtMillis)),
+                entry.audioDurationMillis?.let(::formatElapsed),
+                entry.modelName.takeIf { it.isNotBlank() }
+            ).joinToString(" · ")
+            Text(details, style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(end = 8.dp))
+            Text(entry.text, style = MaterialTheme.typography.bodyMedium,
+                maxLines = if (expanded) Int.MAX_VALUE else 4, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth().padding(end = 8.dp, top = 4.dp)
+                    .clickable { expanded = !expanded })
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                TextButton(onClick = onCopy) { Text("Copy") }
+                TextButton(onClick = onShare) { Text("Share") }
+                TextButton(onClick = onDelete) { Text("Delete", color = Color(0xFF9A4545)) }
+            }
+        }
+    }
 }
