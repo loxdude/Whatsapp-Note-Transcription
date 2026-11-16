@@ -9,12 +9,7 @@ import android.util.Log
 import com.local.voicenotes.audio.ParakeetFeatureExtractor
 import com.local.voicenotes.domain.ImportedModel
 import com.local.voicenotes.domain.LanguageOption
-import com.google.ai.edge.litert.Accelerator
-import com.google.ai.edge.litert.BuiltinNpuAcceleratorProvider
 import com.google.ai.edge.litert.CompiledModel
-import com.google.ai.edge.litert.Environment
-import com.google.ai.edge.litert.NpuCompatibilityChecker
-import com.local.voicenotes.model.QualcommModels
 import com.google.ai.edge.litert.TensorBuffer
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -28,7 +23,13 @@ import java.io.FileOutputStream
 import java.nio.MappedByteBuffer
 import kotlin.coroutines.coroutineContext
 
-class LiteRtParakeetBackend(private val context: Context) : TranscriptionBackend {
+class LiteRtParakeetBackend internal constructor(
+    private val context: Context,
+    private val environments: AcceleratorEnvironmentFactory<LiteRtEnvironment>
+) : TranscriptionBackend {
+    /** CPU models never construct the Qualcomm provider; NPU models are checked explicitly. */
+    constructor(context: Context) : this(context, liteRtEnvironmentFactory(context))
+
     companion object {
         private const val TAG = "LiteRtParakeet"
         private const val BLANK = 8192
@@ -42,10 +43,11 @@ class LiteRtParakeetBackend(private val context: Context) : TranscriptionBackend
         private val WHITESPACE = Regex("""\s+""")
         // Serialize native operations, including close(), so ViewModel disposal
         // cannot free a session while an inference call is still using it.
-        private val npuExecutor = Executors.newSingleThreadExecutor { task ->
-            Thread(task, "ParakeetNpu")
+        // Shared by CPU and NPU sessions; named for the runtime, not an accelerator.
+        private val inferenceExecutor = Executors.newSingleThreadExecutor { task ->
+            Thread(task, "ParakeetLiteRt")
         }
-        private val npuDispatcher = npuExecutor.asCoroutineDispatcher()
+        private val inferenceDispatcher = inferenceExecutor.asCoroutineDispatcher()
     }
 
     @Volatile private var cancelled = false
@@ -61,9 +63,7 @@ class LiteRtParakeetBackend(private val context: Context) : TranscriptionBackend
             require(model.architecture == "parakeet-tdt-0.6b-v3") {
                 "Select the stateful Parakeet TDT 0.6B v3 LiteRT model."
             }
-            require(model.backend.startsWith("litert-qnn") || model.backend == "litert-cpu") {
-                "This model is not configured for local LiteRT inference."
-            }
+            ExecutionTarget.forBackend(model.backend)
             openModel(model).let { mapped ->
                 require(mapped.remaining() > 8 && mapped.get(4) == 'T'.code.toByte() &&
                     mapped.get(5) == 'F'.code.toByte() && mapped.get(6) == 'L'.code.toByte() &&
@@ -73,7 +73,7 @@ class LiteRtParakeetBackend(private val context: Context) : TranscriptionBackend
     }
 
     override suspend fun prepare(model: ImportedModel): Result<Unit> =
-        withContext(npuDispatcher) {
+        withContext(inferenceDispatcher) {
             runCatching {
                 validate(model).getOrThrow()
                 sessionFor(model)
@@ -86,14 +86,14 @@ class LiteRtParakeetBackend(private val context: Context) : TranscriptionBackend
         pcm16KhzMono: FloatArray,
         language: LanguageOption,
         onProgress: (Float) -> Unit
-    ): String = withContext(npuDispatcher) {
+    ): String = withContext(inferenceDispatcher) {
         // Parakeet v3 identifies the language acoustically; the parameter is
         // retained for parity with the baseline UI and benchmark harness.
         @Suppress("UNUSED_VARIABLE") val selectedLanguage = language
         cancelled = false
         val totalStarted = SystemClock.elapsedRealtimeNanos()
         val session = sessionFor(model)
-        Log.i(TAG, "reusePreparedSession=true audioSamples=${pcm16KhzMono.size}")
+        Log.i(TAG, "reusePreparedSession=true accelerator=${session.target.label} audioSamples=${pcm16KhzMono.size}")
         activeSession = session
         try {
             val emitted = ArrayList<Int>()
@@ -207,21 +207,25 @@ class LiteRtParakeetBackend(private val context: Context) : TranscriptionBackend
         val modelFile = openModelFile(model)
         val modelFileMillis = elapsedMillis(modelFileStarted)
         val sessionStarted = SystemClock.elapsedRealtimeNanos()
-        val accelerator = if (model.backend == "litert-cpu") Accelerator.CPU else Accelerator.NPU
+        // Decided by the model's backend only. NPU failures are reported as NPU
+        // failures; there is deliberately no automatic CPU fallback.
+        val target = ExecutionTarget.forBackend(model.backend)
         val created = try {
-            Session(context, modelFile, accelerator)
+            Session(environments, modelFile, target)
         } catch (error: Exception) {
             modelFile.close()
-            Log.e(TAG, "$accelerator preparation failed: soc=${Build.SOC_MODEL} model=${model.displayName}", error)
+            Log.e(TAG, "${target.label} preparation failed: soc=${Build.SOC_MODEL} model=${model.displayName}", error)
             throw IllegalStateException(
-                "$accelerator preparation failed on ${Build.SOC_MANUFACTURER} ${Build.SOC_MODEL}. " +
-                    "${QualcommModels.note(model.displayName, Build.SOC_MODEL)}. ${error.message}", error
+                PreparationDiagnostics.message(
+                    target, model.displayName, Build.SOC_MANUFACTURER, Build.SOC_MODEL, error
+                ),
+                error
             )
         }
         val sessionMillis = elapsedMillis(sessionStarted)
         preparedModelId = model.id
         preparedSession = created
-        Log.i(TAG, "prepared modelFile=${modelFileMillis}ms session=${sessionMillis}ms model=${model.displayName}")
+        Log.i(TAG, "prepared accelerator=${target.label} modelFile=${modelFileMillis}ms session=${sessionMillis}ms model=${model.displayName}")
         created
     }
 
@@ -255,7 +259,7 @@ class LiteRtParakeetBackend(private val context: Context) : TranscriptionBackend
 
     override fun close() {
         cancelled = true
-        npuExecutor.execute { closeSession() }
+        inferenceExecutor.execute { closeSession() }
     }
 
     private fun closeSession() {
@@ -335,11 +339,11 @@ class LiteRtParakeetBackend(private val context: Context) : TranscriptionBackend
     )
 
     private class Session(
-        context: Context,
+        environments: AcceleratorEnvironmentFactory<LiteRtEnvironment>,
         private val modelFile: ModelFile,
-        accelerator: Accelerator
+        val target: ExecutionTarget
     ) : AutoCloseable {
-        private lateinit var environment: Environment
+        private lateinit var environment: LiteRtEnvironment
         private lateinit var model: CompiledModel
         private var encodeInputs: List<TensorBuffer> = emptyList()
         private var encodeOutputs: List<TensorBuffer> = emptyList()
@@ -349,27 +353,12 @@ class LiteRtParakeetBackend(private val context: Context) : TranscriptionBackend
 
         init {
             try {
-                // LiteRT 2.1.6's default allowlist starts at SM8550, although QNN ships
-                // HTP v69 libraries. Only extend it for the two known Gen 1 chips.
-                val provider = BuiltinNpuAcceleratorProvider(context, object : NpuCompatibilityChecker {
-                    override fun isDeviceSupported(): Boolean =
-                        NpuCompatibilityChecker.Qualcomm.isDeviceSupported() ||
-                            QualcommModels.supportsLegacyDevice(Build.SOC_MANUFACTURER, Build.SOC_MODEL)
-                })
-                require(accelerator != Accelerator.NPU || provider.isDeviceSupported()) {
-                    "LiteRT does not recognize this device as a supported Qualcomm NPU."
-                }
-                require(provider.isLibraryReady()) {
-                    "The LiteRT Qualcomm dispatch runtime is not available."
-                }
-                environment = if (accelerator == Accelerator.NPU) Environment.create(provider) else Environment.create()
-                require(accelerator in environment.getAvailableAccelerators()) {
-                    "LiteRT could not register the Qualcomm NPU accelerator."
-                }
+                // Verified for exactly this target; CPU never touches the Qualcomm provider.
+                environment = environments.create(target)
                 model = CompiledModel.create(
                     modelFile.path,
-                    CompiledModel.Options(accelerator),
-                    environment
+                    CompiledModel.Options(target.toLiteRtAccelerator()),
+                    environment.environment
                 )
                 encodeInputs = model.createInputBuffers("encode")
                 encodeOutputs = model.createOutputBuffers("encode")
