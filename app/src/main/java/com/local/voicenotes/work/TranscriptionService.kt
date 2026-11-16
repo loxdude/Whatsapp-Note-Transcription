@@ -75,7 +75,7 @@ class TranscriptionService : Service() {
         val notice = currentNotice()
             ?: OngoingNotice(WorkKind.TRANSCRIPTION, "Voice notes", "Working", null)
         val notification = WorkNotifications.ongoing(this, notice)
-        // Some OEM builds (seen on OxygenOS 16) reject mediaProcessing as "type none" even though
+        // Android 16 devices (OxygenOS 16 and One UI 8 both tested) reject mediaProcessing as "type none" even though
         // it is declared and its permission is granted; dataSync is the declared fallback.
         var lastRefusal: RuntimeException? = null
         for (type in listOf(foregroundType, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC).distinct()) {
