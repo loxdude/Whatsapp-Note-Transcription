@@ -99,6 +99,9 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import java.util.Locale
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
 
 class MainActivity : ComponentActivity() {
     companion object {
@@ -123,12 +126,23 @@ class MainActivity : ComponentActivity() {
             val showHistory by viewModel.showHistory.collectAsStateWithLifecycle()
             KeepScreenOn(state.busy)
             AppTheme {
-                if (showHistory) {
-                    val entries by viewModel.history.collectAsStateWithLifecycle()
-                    HistoryScreen(entries, onClose = { viewModel.setShowHistory(false) },
-                        onDelete = viewModel::deleteHistoryEntry)
-                } else {
-                    TranscriberScreen(state, viewModel, onWorkStarted = ::requestNotificationPermissionOnce)
+                val historyError by viewModel.historyPersistenceError.collectAsStateWithLifecycle()
+                Box(Modifier.fillMaxSize()) {
+                    if (showHistory) {
+                        val entries by viewModel.history.collectAsStateWithLifecycle()
+                        HistoryScreen(entries, onClose = { viewModel.setShowHistory(false) },
+                            onDelete = viewModel::deleteHistoryEntry)
+                    } else {
+                        TranscriberScreen(state, viewModel, onWorkStarted = ::requestNotificationPermissionOnce)
+                    }
+                    historyError?.let { message ->
+                        androidx.compose.material3.Snackbar(
+                            modifier = Modifier.align(Alignment.BottomCenter).safeDrawingPadding().padding(12.dp),
+                            action = {
+                                TextButton(onClick = { viewModel.flushHistory() }) { Text("Retry saving") }
+                            }
+                        ) { Text(message) }
+                    }
                 }
             }
         }
@@ -442,12 +456,33 @@ private fun TranscriberScreen(state: AppUiState, viewModel: AppViewModel, onWork
     }
 
     if (showApiKeyDialog) {
-        val keyStatus = remember { viewModel.apiKeyStatus() }
-        ApiKeyDialog(
-            status = keyStatus,
-            onSave = { apiKey -> viewModel.setApiKey(apiKey).also { if (it == null) showApiKeyDialog = false } },
-            onDismiss = { showApiKeyDialog = false }
-        )
+        var keyStatus by remember { mutableStateOf<com.local.voicenotes.inference.MistralApiKeyStatus?>(null) }
+        var statusError by remember { mutableStateOf<String?>(null) }
+        var reload by remember { mutableStateOf(0) }
+        LaunchedEffect(reload) {
+            statusError = null
+            try { keyStatus = viewModel.apiKeyStatus() }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { statusError = "Could not load saved-key status. Please try again." }
+        }
+        val loadedStatus = keyStatus
+        if (loadedStatus == null) {
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { showApiKeyDialog = false },
+                title = { Text("Mistral API Key") },
+                text = { Text(statusError ?: "Checking saved-key status…") },
+                confirmButton = {
+                    if (statusError != null) TextButton(onClick = { reload++ }) { Text("Retry") }
+                },
+                dismissButton = { TextButton(onClick = { showApiKeyDialog = false }) { Text("Cancel") } }
+            )
+        } else {
+            ApiKeyDialog(
+                status = loadedStatus,
+                onSave = { apiKey -> viewModel.setApiKey(apiKey).also { if (it == null) showApiKeyDialog = false } },
+                onDismiss = { showApiKeyDialog = false }
+            )
+        }
     }
 }
 
@@ -455,16 +490,26 @@ private fun TranscriberScreen(state: AppUiState, viewModel: AppViewModel, onWork
 private fun ApiKeyDialog(
     status: com.local.voicenotes.inference.MistralApiKeyStatus,
     /** Returns an error message, or null when saved. */
-    onSave: (String) -> String?,
+    onSave: suspend (String) -> String?,
     onDismiss: () -> Unit
 ) {
     // The stored key is never decrypted into the UI; the field starts empty.
     var apiKey by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
+    var saving by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    fun save(value: String) {
+        if (saving) return
+        saving = true
+        scope.launch {
+            try { error = onSave(value) }
+            finally { saving = false }
+        }
+    }
     val context = LocalContext.current
 
     androidx.compose.material3.AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (!saving) onDismiss() },
         title = { Text("Mistral API Key") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -497,18 +542,24 @@ private fun ApiKeyDialog(
                     label = { Text("API Key") },
                     placeholder = { Text("sk-...") },
                     visualTransformation = PasswordVisualTransformation(),
+                    enabled = !saving,
                     modifier = Modifier.fillMaxWidth()
                 )
                 error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = Color(0xFF9A4545)) }
             }
         },
         confirmButton = {
-            Button(onClick = { error = onSave(apiKey) }, enabled = apiKey.isNotBlank()) {
-                Text("Save")
+            Column(horizontalAlignment = Alignment.End) {
+                Button(onClick = { save(apiKey) }, enabled = apiKey.isNotBlank() && !saving) {
+                    Text(if (saving) "Saving…" else "Save")
+                }
+                if (status != com.local.voicenotes.inference.MistralApiKeyStatus.ABSENT) {
+                    TextButton(onClick = { save("") }, enabled = !saving) { Text("Remove saved key") }
+                }
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
+            TextButton(onClick = onDismiss, enabled = !saving) {
                 Text("Cancel")
             }
         }

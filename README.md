@@ -22,7 +22,7 @@ Local decoding accepts up to 15 minutes of audio. The Mistral path uploads the s
 
 The main screen now keeps the audio picker, current backend, language, progress, and transcription button in one card. The transcript fills the rest of the screen and can be edited or copied. Model import, language selection, and the Mistral API key are in the settings sheet.
 
-The screen stays awake while a transcription is running. A cancel button appears during active work.
+The screen stays awake while a transcription is running. A cancel button appears during active work. UI and notification Cancel use the same process-owned authority, including shares still waiting for metadata or model loading; cancelling these releases their foreground-service reservation immediately.
 
 ### Share to the app
 
@@ -32,7 +32,7 @@ Shared files come with a temporary read permission that can end when the app's s
 
 ### History
 
-Every finished transcript is saved on the device (`files/transcript_history.json`, newest 100). Edits to the current transcript are saved to its history entry. The list button on the main screen opens the history, where entries can be copied, shared as text, or deleted. The file is written atomically with a `.bak` copy of the previous version; an unreadable file falls back to the backup or an empty history.
+Every finished transcript is saved on the device (`files/transcript_history.json`, newest 100). Edits to the current transcript are saved to its history entry. The list button on the main screen opens the history, where entries can be copied, shared as text, or deleted. The file is written atomically with a synced `.bak` recovery copy; an unreadable file falls back to the backup or an empty history. Deleting an entry also sanitizes recovery copies so it cannot reappear from `.bak`/`.corrupt`. If saving fails, the newest snapshot stays pending in RAM: the app shows an error and a `Retry saving` action, and background flush retries even without another edit. Pending changes cannot survive process death until storage succeeds.
 
 ### Background work
 
@@ -126,7 +126,9 @@ Parakeet TDT v3 rows are kept for reference; v3 is no longer part of the app.
 
 This option requires internet access. It uploads the original audio to `https://api.mistral.ai/v1/audio/transcriptions` and requests `voxtral-mini-latest`. If you select a language, the app sends its language code. Auto-detect omits that field.
 
-The app encrypts the saved key with AES-GCM. The encryption key stays in Android Keystore. Developers may also provide `MISTRAL_API_KEY` in the app process environment; that value takes precedence over the saved key.
+The settings dialog can also remove a saved key. Status loading, saving and removing all run off the UI thread, with loading/busy states and errors. A slow KeyStore read from a cancelled request cannot synchronously block dialog composition. UI and backend share the same key store, with cross-instance serialization of read/write/reset.
+
+The app encrypts the saved key with AES-GCM. The encryption key stays in Android Keystore. In debuggable builds, developers may also provide `MISTRAL_API_KEY` in the app process environment; that value takes precedence over the saved key. Release builds ignore the environment override.
 
 ## Logs and measurements
 
@@ -147,6 +149,8 @@ Run the JVM unit tests with:
 ```bash
 ./gradlew testDebugUnitTest
 ```
+
+The hardware-dependent resampler timing probe is excluded from ordinary unit tests. Run it explicitly with `./gradlew :app:resamplerBenchmark`; it reports timing without a host-speed pass/fail threshold. The functional length, split-independence and signal-quality tests remain in the ordinary suite.
 
 The dependency-free `AudioDecoderChecks` instrumentation runner exercises native Opus, Android fallback, invalid input and the duration limit on real devices. Native host tests compare sample counts and PCM against ffmpeg/libopus, including stereo, chained streams and SAF offset/length handling. See [native/README.md](native/README.md) for rebuilding the native library and running device checks.
 

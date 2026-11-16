@@ -6,6 +6,8 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import com.local.voicenotes.concurrent.runCatchingCancellable
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -170,8 +172,10 @@ class MistralApiKeyStore internal constructor(private val repository: ApiKeyRepo
     /** Plaintext key or null (absent or unreadable). Prefer [read] to distinguish the two. */
     fun get(): String? = (read() as? MistralApiKeyResult.Present)?.key
 
-    /** Cheap status for UI; does not decrypt. */
+    /** Does not decrypt, but may wait for a concurrent Keystore transaction; use [statusAsync] from UI. */
     fun status(): MistralApiKeyStatus = repository.status()
+
+    suspend fun statusAsync(): MistralApiKeyStatus = withContext(Dispatchers.IO) { status() }
 
     fun hasKey(): Boolean = status() == MistralApiKeyStatus.CONFIGURED
 

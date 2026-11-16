@@ -1,5 +1,58 @@
 # Vollständiges Code-Review: Voice Note Transcriber
 
+## Umsetzungsstand nach freigegebenem Fix-Batch
+
+Die nachfolgenden Findings dokumentieren den damaligen Reviewstand. Inzwischen umgesetzt:
+
+- Alle vier P2-Punkte: zentraler prozessweiter Share-/Notification-Cancel inklusive
+  blockierter Metadatenabfrage; bereinigte History-Wiederherstellungskopien; Dirty-Snapshot-
+  Retry mit sichtbarem Fehler und Retry-Aktion; gemeinsame KeyStore-Injektion plus
+  instanzübergreifender Read/Write/Reset-Lock.
+- Kleinere Produktpunkte: vollständige Short-Reads vor Import-Grant/Persistenz; explizites
+  API-Key-Entfernen und asynchrones Speichern; URI-/PCM-Mistralpfad mit gleichem frühem
+  Cancellation-Marker und stückweisem PCM-Staging ohne komplettes Zwischen-ByteArray.
+- Kleine Effizienzpunkte: Opus-Puffer ohne Teilkopie, Metadaten nur einmal, exakte
+  gerundete PCM-Kapazität, nur Mel-Padding nullen, deaktivierte v3-Einträge ohne Provider-
+  I/O, wiederverwendete Test-Logits.
+- Alle fünf benannten Test-Trims durchgeführt (Assertions erhalten/zusammengelegt;
+  Timingprobe in explizitem `:app:resamplerBenchmark`). Neue gezielte Regressionen erhöhen
+  die Gesamtzahl trotzdem: aktueller integrierter Standardlauf 272 Tests ohne Fehler.
+- Worker-Barrieren statt Start-Sleeps, echter nächster Cache-Acquire für Lease-GC, ehrlicher
+  Wiederverwendungstest statt unbelegter Rehash-Behauptung und deterministische Uhr für
+  tatsächlichen Zwischenfortschritt. History-Testexecutors werden beendet.
+- Verpflichtende synthetische Decoder-Fixtures mit gehashten Referenzen, Sample- und
+  Signalprüfung; reale test-only Binder-Provider prüfen Offset/Length/FD-Position sowie
+  Pipe-Verweigerung/Fallback/Cleanup. Native Read-Cancellation jetzt innerhalb eines
+  einzelnen Reads nach bereits ausgegebenem PCM geprüft. Keine privaten Fixtures im Repo.
+
+Bisherige Nachweise des Fix-Batches: Offline-Debug- und Instrumentierungs-APK gebaut;
+272 Standard-JVM-Tests grün; expliziter Resampler-Benchmark ausgeführt; 15 native Hosttests
+grün. Synthetische Signal-/Providerchecks auf allen drei Geräten bestanden. Lange und
+kurze echte Notiz auf allen drei Geräten erfolgreich, alle sechs Texte exakt gleich wie
+vor dem Fix-Batch. ACTION_SEND-Autostart mit dem echten Testprovider auf allen drei
+Geräten erfolgreich (Fold-Provider musste nach Prozessende neu gestaged werden).
+
+Das Integrationsreview fand zusätzlich einen Main-Thread-Lockkonflikt beim synchronen
+Key-Statusabruf. Auch dieser ist jetzt asynchron: `statusAsync()` auf IO, suspendierende
+ViewModel-API und `LaunchedEffect` mit Lade-/Fehlerzustand im Dialog. Der neue
+UI-Dispatcher-Heartbeat-Test blockiert den Key-Read per Barriere, wurde mit synchronem
+Status tatsächlich rot (Timeout) und besteht mit IO-Dispatch. Die letzte Fassung ist auf
+OnePlus und Fold installiert, per APK-SHA-256 bestätigt und ihr Dialog geprüft. Das
+Note10+ wurde vor dieser letzten Dialogänderung vom USB getrennt; dort ist die unmittelbar
+vorherige, aufwendiger getestete Fassung installiert. Das aktuelle APK liegt lokal bereit.
+
+Zusätzlich auf dem Note10+: echter Android-Keystore über die UI mit ausschließlich
+einem synthetischen Schlüssel gespeichert und wieder entfernt (vorher kein Nutzer-Key);
+History-Schreibfehler reversibel am Temp-Pfad injiziert -> sichtbarer Retry -> ohne neue
+Bearbeitung korrekt gespeichert und Fehleranzeige entfernt. Bestehende Nutzer-Keys auf
+anderen Geräten wurden nicht verändert; keine Cloud-Anfrage für diese Prüfungen.
+
+Bewusst nicht umgebaut: die größere Compose-Progress-/Elapsed-Abonnementstruktur ohne
+Profiling-Nachweis. Release-Offlinecache-Blockade bleibt unverändert. Spezifikations- und
+Qualitätsreviews sind bestanden; das gezielte Re-Review des zusätzlichen Status-Lock-
+Befunds hat ebenfalls APPROVED erteilt. Keine verbleibenden P1/P2-Blocker in den geprüften
+Änderungen. Die Änderungen werden ausschließlich lokal committed; kein Push.
+
 ## Umfang und Urteil
 
 Drei unabhängige Reviews des aktuellen vollständigen Codes: Audio/Inferenz/Native/Cache;

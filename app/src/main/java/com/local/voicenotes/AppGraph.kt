@@ -55,8 +55,8 @@ class AppGraph(private val app: VoiceNotesApplication) {
     private val repository = ModelRepository(app)
     private val decoder = AndroidAudioDecoder(app.contentResolver)
     private val liteRtBackend = LiteRtParakeetBackend(app)
-    private val mistralBackend = MistralTranscriptionBackend(app)
     val mistralApiKeyStore = MistralApiKeyStore(app)
+    private val mistralBackend = MistralTranscriptionBackend(app, mistralApiKeyStore)
 
     val history = TranscriptHistory(
         store = TranscriptHistoryStore(

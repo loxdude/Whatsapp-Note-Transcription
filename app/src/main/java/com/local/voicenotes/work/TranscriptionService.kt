@@ -147,7 +147,7 @@ class TranscriptionService : Service() {
     /** API 35 time limit for dataSync/mediaProcessing (6 h): cancel and stop promptly. */
     override fun onTimeout(startId: Int, fgsType: Int) {
         Log.w(TAG, "Foreground service time limit reached; cancelling work")
-        appGraph.coordinator.cancel()
+        appGraph.cancelWork()
         leaveForeground()
         stopSelfResult(latestStartId)
     }
