@@ -7,6 +7,7 @@ The app does not include the encoder. Import a Parakeet Ultra encoder `.tflite` 
 ## What it does
 
 - Transcribes OGG and Opus voice notes, MP3, M4A, AAC, and WAV files.
+- Decodes Ogg Opus directly with bundled libopus/libopusfile; other formats use Android MediaCodec.
 - Runs Parakeet Ultra (30/20/10 s windows) on the CPU without a network connection.
 - Offers `voxtral-mini-latest` as an online alternative.
 - Supports automatic language detection and 12 named languages: German, English, Spanish, French, Italian, Portuguese, Dutch, Polish, Turkish, Japanese, Korean, and Chinese.
@@ -111,7 +112,7 @@ Word error rate on 29 real German WhatsApp voice notes (23 minutes), measured wi
 | Parakeet Ultra i8, 30 s windows, no overlap | 10.7% |
 | Parakeet Ultra i8, 30 s windows, hop 25 s | 10.4% |
 
-The app uses hop = window − 2 s (28 s for 30 s windows); the 30 s row with overlap was measured with a 25 s hop.
+The app uses hop = window − 2 s (28 s for 30 s windows); the 30 s row with overlap above was measured with a 25 s hop. A follow-up using the app's fixed 30 s encoder padding and 28 s hop scored 10.36% with the previous desktop/ffmpeg PCM and 10.39% with actual Android native-libopus/resampler PCM on the same 29 notes: effectively unchanged at this sample size.
 
 Parakeet TDT v3 rows are kept for reference; v3 is no longer part of the app.
 
@@ -147,7 +148,7 @@ Run the JVM unit tests with:
 ./gradlew testDebugUnitTest
 ```
 
-There are no instrumentation tests; the former QNN smoke test was removed with the NPU path.
+The dependency-free `AudioDecoderChecks` instrumentation runner exercises native Opus, Android fallback, invalid input and the duration limit on real devices. Native host tests compare sample counts and PCM against ffmpeg/libopus, including stereo, chained streams and SAF offset/length handling. See [native/README.md](native/README.md) for rebuilding the native library and running device checks.
 
 ## Source layout
 
@@ -162,7 +163,9 @@ app/src/main/java/com/local/voicenotes/
 ├── share/SharedAudio.kt            Auto-transcribe rules for shared audio
 ├── work/                           Foreground service, notifications, cancel receiver
 ├── audio/
-│   └── AndroidAudioDecoder.kt      Android codec decoding and 16 kHz mono conversion
+│   ├── AndroidAudioDecoder.kt      Native Opus fast path / Android fallback, 16 kHz mono
+│   ├── NativeOpus.kt               Narrow JNI interface to libopusfile
+│   └── OpusPcm.kt                  Bounded, cancellable PCM conversion
 ├── domain/TranscriptionModels.kt   UI and transcription data types
 ├── inference/
 │   ├── LiteRtParakeetBackend.kt    Parakeet Ultra CPU sessions (mel → encoder → decoder)
@@ -197,5 +200,7 @@ Open an issue or send a pull request with a focused change. For model or perform
 The project uses the MIT License. See [LICENSE](LICENSE).
 
 LiteRT uses Apache License 2.0.
+
+The bundled `libvoicenotes_opus.so` links libopus 1.5.2, libogg 1.3.5 and opusfile 0.12 (BSD-style licenses). Their complete notices ship in `app/src/main/assets/licenses/`. The JNI wrapper and reproducible, checksum-pinned build script are in `native/`; normal Gradle builds use the prebuilt arm64 library and do not need an NDK.
 
 The bundled Parakeet Ultra files (`parakeet_ultra_mel_10s.tflite`, `parakeet_ultra_mel_20s.tflite`, `parakeet_ultra_mel_30s.tflite`, `parakeet_ultra_decoder_i8.tflite`) are unmodified copies from [litert-community/parakeet-ultra](https://huggingface.co/litert-community/parakeet-ultra), licensed under [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/). They are converted from [moondream/parakeet-ultra](https://huggingface.co/moondream/parakeet-ultra), which is based on NVIDIA's [parakeet-tdt-0.6b-v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) (CC-BY-4.0). The settings sheet shows the same attribution.

@@ -12,4 +12,6 @@ captures/
 .tmp-*
 tools/*.class
 .gitconfig-codex
+__pycache__/
+*.py[cod]
 

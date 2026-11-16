@@ -7,6 +7,7 @@ import android.media.MediaFormat
 import android.net.Uri
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import android.util.Log
 import java.nio.ByteOrder
@@ -30,38 +31,86 @@ class AndroidAudioDecoder(private val resolver: ContentResolver) {
         } else UNKNOWN_DURATION_SAMPLES
     }
 
-    suspend fun decode(uri: Uri, onProgress: (Float) -> Unit): FloatArray = withContext(Dispatchers.IO) {
-        val extractor = MediaExtractor()
+    suspend fun decode(uri: Uri, onProgress: (Float) -> Unit): FloatArray = decodeWithRoute(uri, onProgress) {}
+
+    internal suspend fun decodeWithRoute(
+        uri: Uri, onProgress: (Float) -> Unit, onRoute: (String) -> Unit
+    ): FloatArray = withContext(Dispatchers.IO) {
+        coroutineContext.ensureActive()
+        if (NativeOpus.available) {
+            try {
+                decodeOpus(uri, onProgress)?.let { onRoute("native-opus"); return@withContext it }
+            } catch (error: NativeOpusException) {
+                // No partial native output escapes. Cancellation and the duration cap propagate.
+                Log.w("VoiceNotesBenchmark", "Native Opus rejected stream; using Android decoder: ${error.message}")
+            }
+        }
+        coroutineContext.ensureActive()
+        onRoute("android")
+        decodePlatform(uri, onProgress)
+    }
+
+    private suspend fun decodeOpus(uri: Uri, onProgress: (Float) -> Unit): FloatArray? {
+        val started = System.nanoTime()
+        resolver.openAssetFileDescriptor(uri, "r")?.use { descriptor ->
+            val job = coroutineContext
+            val status = IntArray(1)
+            // Android may tag pointers in the high byte: valid opaque handles can be negative.
+            val handle = NativeOpus.open(
+                descriptor.parcelFileDescriptor.fd, descriptor.startOffset, descriptor.length,
+                NativeOpusControl { !job.isActive }, status
+            )
+            if (handle == 0L) {
+                OpusPcm.checkNativeFailure(status[0]) { job.ensureActive() }
+                return null // Not Ogg Opus, malformed header or non-seekable provider.
+            }
+            val source = object : OpusPcmSource {
+                override val totalFrames: Long get() = NativeOpus.total(handle)
+                override fun read(target: FloatArray) = NativeOpus.read(handle, target)
+                override fun close() = NativeOpus.close(handle)
+            }
+            source.use {
+                val pcm = OpusPcm.decode(it, onProgress, { job.ensureActive() })
+                Log.i("VoiceNotesBenchmark", "decodeOpus native=true samples=${pcm.size} total=${(System.nanoTime() - started) / 1_000_000}ms")
+                return pcm
+            }
+        }
+        return null
+    }
+
+    private suspend fun decodePlatform(uri: Uri, onProgress: (Float) -> Unit): FloatArray {
         val descriptor = resolver.openAssetFileDescriptor(uri, "r")
             ?: error("The selected audio file cannot be opened.")
-        try {
-            extractor.setDataSource(descriptor.fileDescriptor, descriptor.startOffset, descriptor.length)
-            val track = (0 until extractor.trackCount).firstOrNull {
-                extractor.getTrackFormat(it).getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true
-            } ?: error("The selected file has no supported audio track.")
-            extractor.selectTrack(track)
-            val sourceFormat = extractor.getTrackFormat(track)
-            val mime = sourceFormat.getString(MediaFormat.KEY_MIME) ?: error("Audio format is missing.")
-            val durationUs = sourceFormat.longOrNull(MediaFormat.KEY_DURATION) ?: descriptor.declaredLength
-                .takeIf { it > 0 }?.let { 0L } ?: 0L
-            require(durationUs <= 0L || durationUs <= MAX_DURATION_US) {
-                "Audio is longer than the 15-minute limit."
-            }
-            val output = FloatAccumulator(initialCapacityFor(durationUs), MAX_OUTPUT_SAMPLES)
-            val codec = MediaCodec.createDecoderByType(mime)
+        return descriptor.use {
+            val extractor = MediaExtractor()
             try {
-                codec.configure(sourceFormat, null, null, 0)
-                codec.start()
-                decodeLoop(codec, extractor, durationUs, output, onProgress)
+                extractor.setDataSource(descriptor.fileDescriptor, descriptor.startOffset, descriptor.length)
+                val track = (0 until extractor.trackCount).firstOrNull {
+                    extractor.getTrackFormat(it).getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true
+                } ?: error("The selected file has no supported audio track.")
+                extractor.selectTrack(track)
+                val sourceFormat = extractor.getTrackFormat(track)
+                val mime = sourceFormat.getString(MediaFormat.KEY_MIME) ?: error("Audio format is missing.")
+                val durationUs = sourceFormat.longOrNull(MediaFormat.KEY_DURATION) ?: descriptor.declaredLength
+                    .takeIf { it > 0 }?.let { 0L } ?: 0L
+                require(durationUs <= 0L || durationUs <= MAX_DURATION_US) {
+                    "Audio is longer than the 15-minute limit."
+                }
+                val output = FloatAccumulator(initialCapacityFor(durationUs), MAX_OUTPUT_SAMPLES)
+                val codec = MediaCodec.createDecoderByType(mime)
+                try {
+                    codec.configure(sourceFormat, null, null, 0)
+                    codec.start()
+                    decodeLoop(codec, extractor, durationUs, output, onProgress)
+                } finally {
+                    runCatching { codec.stop() }
+                    codec.release()
+                }
+                onProgress(1f)
+                output.toArray()
             } finally {
-                runCatching { codec.stop() }
-                codec.release()
+                extractor.release()
             }
-            onProgress(1f)
-            output.toArray()
-        } finally {
-            extractor.release()
-            descriptor.close()
         }
     }
 

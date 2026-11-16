@@ -18,7 +18,7 @@ android {
         versionName = "0.5.0-litert"
         ndk { abiFilters += "arm64-v8a" }
 
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        testInstrumentationRunner = "com.local.voicenotes.audio.AudioDecoderChecks"
     }
 
     buildFeatures { compose = true }
@@ -68,5 +68,8 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-tooling")
 
     testImplementation("junit:junit:4.13.2")
+    // Match versions pulled into the debug app by ui-tooling (also permits offline test builds).
+    androidTestImplementation("androidx.compose.foundation:foundation:1.9.0")
+    androidTestImplementation("androidx.compose.animation:animation:1.9.0")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
 }
