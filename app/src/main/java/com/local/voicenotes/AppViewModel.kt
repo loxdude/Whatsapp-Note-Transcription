@@ -11,6 +11,7 @@ import com.local.voicenotes.audio.AndroidAudioDecoder
 import com.local.voicenotes.domain.ImportedModel
 import com.local.voicenotes.domain.LanguageOption
 import com.local.voicenotes.inference.LiteRtParakeetBackend
+import com.local.voicenotes.inference.MistralApiKeyStatus
 import com.local.voicenotes.inference.MistralApiKeyStore
 import com.local.voicenotes.inference.MistralTranscriptionBackend
 import com.local.voicenotes.model.ModelRepository
@@ -135,11 +136,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun editTranscript(value: String) = coordinator.editTranscript(value)
 
-    fun setApiKey(apiKey: String) {
-        mistralApiKeyStore.set(apiKey)
-    }
+    /** Saves the key; returns an error message for the UI instead of throwing on Keystore failure. */
+    fun setApiKey(apiKey: String): String? =
+        mistralApiKeyStore.set(apiKey.trim()).exceptionOrNull()?.let { "Could not save the API key: ${it.message}" }
 
-    fun getApiKey(): String? = mistralApiKeyStore.get()
+    /** Key status for the UI; never decrypts or exposes the stored key. */
+    fun apiKeyStatus(): MistralApiKeyStatus = mistralApiKeyStore.status()
 
     override fun onCleared() {
         // viewModelScope is already cancelled here; dispose() additionally discards any late

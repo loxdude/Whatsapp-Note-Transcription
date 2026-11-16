@@ -162,7 +162,7 @@ private fun TranscriberScreen(state: AppUiState, viewModel: AppViewModel) {
                             color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
                         val modelSummary = when (state.selectedModel?.backend) {
                             "mistral-api" -> "Cloud model: Mistral"
-                            null -> "No model selected"
+                            null -> "No model selected. Import a model or choose Mistral in settings."
                             else -> "On-device model: Parakeet"
                         }
                         Text(modelSummary, style = MaterialTheme.typography.labelMedium)
@@ -313,12 +313,10 @@ private fun TranscriberScreen(state: AppUiState, viewModel: AppViewModel) {
     }
 
     if (showApiKeyDialog) {
+        val keyStatus = remember { viewModel.apiKeyStatus() }
         ApiKeyDialog(
-            currentApiKey = viewModel.getApiKey(),
-            onSave = { apiKey ->
-                viewModel.setApiKey(apiKey)
-                showApiKeyDialog = false
-            },
+            status = keyStatus,
+            onSave = { apiKey -> viewModel.setApiKey(apiKey).also { if (it == null) showApiKeyDialog = false } },
             onDismiss = { showApiKeyDialog = false }
         )
     }
@@ -326,11 +324,14 @@ private fun TranscriberScreen(state: AppUiState, viewModel: AppViewModel) {
 
 @Composable
 private fun ApiKeyDialog(
-    currentApiKey: String?,
-    onSave: (String) -> Unit,
+    status: com.local.voicenotes.inference.MistralApiKeyStatus,
+    /** Returns an error message, or null when saved. */
+    onSave: (String) -> String?,
     onDismiss: () -> Unit
 ) {
-    var apiKey by remember { mutableStateOf(currentApiKey ?: "") }
+    // The stored key is never decrypted into the UI; the field starts empty.
+    var apiKey by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
     val context = LocalContext.current
 
     androidx.compose.material3.AlertDialog(
@@ -339,6 +340,14 @@ private fun ApiKeyDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Enter your Mistral API key to use the Mistral Transcription API.")
+                when (status) {
+                    com.local.voicenotes.inference.MistralApiKeyStatus.CONFIGURED ->
+                        Text("A key is saved. Enter a new one to replace it.", style = MaterialTheme.typography.bodySmall)
+                    com.local.voicenotes.inference.MistralApiKeyStatus.UNREADABLE ->
+                        Text("The saved key could not be decrypted. Enter it again.",
+                            style = MaterialTheme.typography.bodySmall, color = Color(0xFF9A4545))
+                    else -> Unit
+                }
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Text("Need a key?", fontWeight = FontWeight.SemiBold)
                     Text(
@@ -361,10 +370,11 @@ private fun ApiKeyDialog(
                     visualTransformation = PasswordVisualTransformation(),
                     modifier = Modifier.fillMaxWidth()
                 )
+                error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = Color(0xFF9A4545)) }
             }
         },
         confirmButton = {
-            Button(onClick = { onSave(apiKey) }) {
+            Button(onClick = { error = onSave(apiKey) }, enabled = apiKey.isNotBlank()) {
                 Text("Save")
             }
         },
