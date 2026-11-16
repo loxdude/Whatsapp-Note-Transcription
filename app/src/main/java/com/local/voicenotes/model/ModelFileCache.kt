@@ -12,7 +12,11 @@ import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executor
+import java.util.concurrent.FutureTask
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.locks.ReentrantLock
 
 /**
@@ -24,6 +28,8 @@ import java.util.concurrent.locks.ReentrantLock
  *    atomic rename after every byte was written, fsynced, counted and hashed, so a
  *    partial/failed/interrupted copy can never appear under a blob name.
  *  - `refs/<sha256(key)>`: the digest last resolved for a source key (cleanup only).
+ *  - `records/<sha256(key)>`: "verified record" written after a full verification: digest,
+ *    source stamp and blob length/mtime. Only a hint for [acquireRecorded]; never proof.
  *  - `tmp/`: in-flight copies with unique names; deleted on failure and, as leftovers
  *    of killed processes, at the start of the next resolution.
  *
@@ -32,6 +38,11 @@ import java.util.concurrent.locks.ReentrantLock
  * stayed the same is never served from stale bytes. A cache hit costs one sequential
  * read of the source and no writes. Resolutions of one directory are serialized
  * in-process (lock) and across processes ([FileChannel.lock]).
+ *
+ * [acquireRecorded] is the cold-start fast path: when the persisted record still matches the
+ * source stamp and the blob's length/mtime, it returns the blob without hashing anything and
+ * the caller must run [RecordedBlob.verify] (typically via [RecordedBlob.startVerification])
+ * and must not publish any result derived from the blob before that check succeeded.
  */
 class ModelFileCache(
     directory: File,
@@ -73,6 +84,7 @@ class ModelFileCache(
     private val root = runCatching { directory.canonicalFile }.getOrElse { directory.absoluteFile }
     private val blobs = File(root, "blobs")
     private val refs = File(root, "refs")
+    private val records = File(root, "records")
     private val tmp = File(root, "tmp")
     private val lockFile = File(root, ".lock")
 
@@ -105,28 +117,226 @@ class ModelFileCache(
 
     private fun resolveLocked(source: Source, checkCancelled: () -> Unit, trustedBlobPath: String?): File {
         purgeIncompleteAndLegacy()
-        val refFile = File(refs, sha256Hex(source.key.encodeToByteArray()))
+        val keyName = keyName(source)
+        val refFile = File(refs, keyName)
+        val recordFile = File(records, keyName)
         val previous = readRef(refFile)
         var sourceDigest: String? = null
         if (previous != null && isCompleteBlob(blobFor(previous), source.expectedSize)) {
             // Verify instead of trusting URI/size: hash only, no writes on a hit.
+            val stampBefore = source.stamp()
             val digest = source.open().use { hashStream(it, source.expectedSize, null, checkCancelled) }
             sourceDigest = digest
             val known = blobFor(digest)
+            val trusted = isTrusted(known, trustedBlobPath)
             if (isCompleteBlob(known, source.expectedSize) &&
                 blobIntact(known, digest, source.expectedSize, checkCancelled, trustedBlobPath)
             ) {
                 if (digest != previous) writeRef(refFile, digest)
+                val stamp = stampBefore?.takeIf { it == source.stamp() }
+                updateRecord(recordFile, digest, known, source.expectedSize, stamp, blobHashed = !trusted)
                 return known
             }
         }
         // Changed or never cached: one pass that copies and hashes together.
-        val blob = copyToBlob(source, sourceDigest, checkCancelled)
-        writeRef(refFile, blob.name.removeSuffix(BLOB_SUFFIX))
+        val (blob, stamp) = copyToBlob(source, sourceDigest, checkCancelled)
+        val digest = blob.name.removeSuffix(BLOB_SUFFIX)
+        writeRef(refFile, digest)
+        updateRecord(recordFile, digest, blob, source.expectedSize, stamp, blobHashed = true)
         return blob
     }
 
-    private fun copyToBlob(source: Source, expectedDigest: String?, checkCancelled: () -> Unit): File {
+    /**
+     * Fast path for cold starts. Returns a lease on the blob recorded for [source] *without
+     * hashing anything* when the verified record exists, [Source.stamp] is non-null and equal to
+     * the recorded stamp, the ref still points at the recorded digest and the blob's length and
+     * mtime are unchanged. Returns null otherwise; the caller then uses [acquire].
+     *
+     * The returned bytes are NOT verified. Callers must run [RecordedBlob.verify] and must not
+     * publish anything derived from the blob unless it returned true. Residual risk: a source
+     * rewritten with identical size AND identical provider lastModified (or a blob modified
+     * with its mtime restored) passes this check and is only caught by that verification,
+     * which therefore has to gate every result.
+     */
+    fun acquireRecorded(source: Source, checkCancelled: () -> Unit = {}): RecordedBlob? {
+        require(source.expectedSize > 0) { "The model has no recorded size." }
+        val stamp = source.stamp() ?: return null
+        val keyName = keyName(source)
+        return withDirectoryLock(checkCancelled) {
+            purgeIncompleteAndLegacy()
+            val recordFile = File(records, keyName)
+            val recordText = readText(recordFile) ?: return@withDirectoryLock null
+            val record = Record.decode(recordText) ?: return@withDirectoryLock null
+            val blob = blobFor(record.digest)
+            val usable = record.stamp == stamp &&
+                record.expectedSize == source.expectedSize &&
+                record.blobLength == source.expectedSize &&
+                readRef(File(refs, keyName)) == record.digest &&
+                blob.isFile &&
+                blob.length() == record.blobLength &&
+                blob.lastModified() == record.blobModified
+            if (!usable) return@withDirectoryLock null
+            synchronized(leases) { leases[blob.path] = (leases[blob.path] ?: 0) + 1 }
+            RecordedBlob(Lease(blob), record, recordText, recordFile, source)
+        }
+    }
+
+    /**
+     * Blob returned by [acquireRecorded] whose content has not been verified in this process.
+     * [lease] belongs to the caller (e.g. the session built on the file).
+     */
+    inner class RecordedBlob internal constructor(
+        val lease: Lease,
+        private val record: Record,
+        private val recordText: String,
+        private val recordFile: File,
+        private val source: Source
+    ) {
+        val file: File get() = lease.file
+        val digest: String get() = record.digest
+        /** The source stamp that matched the record. */
+        val stamp: String get() = record.stamp
+
+        /**
+         * Full check: the source currently hashes to [digest] (and its stamp did not change
+         * meanwhile) AND the blob hashes to [digest]. The blob is hashed on [executor] while
+         * the source is hashed on the calling thread. On a mismatch or any error other than
+         * cancellation the record is deleted (so the next cold start takes the full path) and
+         * false is returned. Exceptions thrown by [checkCancelled] propagate unchanged and keep
+         * the record. The caller must hold a lease on [file] for the duration.
+         */
+        fun verify(executor: Executor, checkCancelled: () -> Unit = {}): Boolean {
+            val cancelled = AtomicBoolean()
+            val abort = AtomicBoolean()
+            val guard: () -> Unit = {
+                try {
+                    checkCancelled()
+                } catch (error: Throwable) {
+                    cancelled.set(true)
+                    throw error
+                }
+                if (abort.get()) throw IOException("Verification aborted.")
+            }
+            val blobTask = FutureTask<String?> {
+                try {
+                    file.inputStream().use { hashStream(it, record.blobLength, null, guard) }
+                } catch (error: Exception) {
+                    if (cancelled.get()) throw error
+                    null
+                }
+            }
+            var submitted = false
+            try {
+                var sourceOk = false
+                var blobOk = false
+                try {
+                    executor.execute(blobTask)
+                    submitted = true
+                    val sourceDigest = try {
+                        source.open().use { hashStream(it, source.expectedSize, null, guard) }
+                    } catch (error: Exception) {
+                        if (cancelled.get()) throw error
+                        null
+                    }
+                    sourceOk = sourceDigest == record.digest && source.stamp() == record.stamp
+                    if (!sourceOk) abort.set(true) // the outcome is already known
+                    val blobDigest = try {
+                        blobTask.get()
+                    } catch (error: ExecutionException) {
+                        throw error.cause ?: error
+                    }
+                    blobOk = blobDigest == record.digest
+                } catch (error: Throwable) {
+                    if (cancelled.get() || error is VirtualMachineError) throw error
+                    // Any other failure counts as failed verification.
+                }
+                if (sourceOk && blobOk) return true
+                if (sourceOk) corruptBlobsDetected++
+                invalidateRecord()
+                return false
+            } finally {
+                // Never return while the blob reader still runs: the caller's lease must
+                // cover every read. It stops at the next buffer once aborted.
+                abort.set(true)
+                if (submitted) runCatching { blobTask.get() }
+            }
+        }
+
+        /**
+         * Starts [verify] on [executor], holding its own lease on [file] until the check has
+         * ended or was cancelled before it started. [executor] must be able to run two tasks
+         * at once (source and blob are hashed concurrently), e.g. a cached thread pool.
+         */
+        fun startVerification(
+            executor: Executor,
+            onFinished: (BackgroundVerification, BackgroundVerification.Outcome, Long) -> Unit = { _, _, _ -> }
+        ): BackgroundVerification = BackgroundVerification(executor, retain(lease), onFinished) { checkCancelled ->
+            verify(executor, checkCancelled)
+        }
+
+        /** Deletes the record unless it was rewritten meanwhile (e.g. by a full resolution). */
+        fun invalidateRecord() {
+            if (readText(recordFile) == recordText) recordFile.delete()
+        }
+    }
+
+    private fun retain(lease: Lease): Lease {
+        synchronized(leases) {
+            val held = leases[lease.file.path] ?: 0
+            check(held > 0) { "The blob lease was already released." }
+            leases[lease.file.path] = held + 1
+        }
+        return Lease(lease.file)
+    }
+
+    /**
+     * Writes a fresh record when [blob] was hashed in this resolution and the source stamp is
+     * known and was stable; otherwise keeps an existing record only if it still describes
+     * exactly this state, and deletes it if not.
+     */
+    private fun updateRecord(file: File, digest: String, blob: File, size: Long, stamp: String?, blobHashed: Boolean) {
+        val current = Record(digest, size, blob.length(), blob.lastModified(), stamp ?: "")
+        if (stamp == null || stamp.contains('\n')) {
+            file.delete()
+            return
+        }
+        if (!blobHashed) {
+            if (readText(file)?.let(Record::decode) != current) file.delete()
+            return
+        }
+        val text = current.encode()
+        if (readText(file) == text) return
+        runCatching { writeAtomically(records, file, text) }.onFailure { file.delete() }
+    }
+
+    internal data class Record(
+        val digest: String,
+        val expectedSize: Long,
+        val blobLength: Long,
+        val blobModified: Long,
+        val stamp: String
+    ) {
+        fun encode() = listOf(VERSION, digest, expectedSize, blobLength, blobModified, stamp).joinToString("\n")
+
+        companion object {
+            private const val VERSION = "v1"
+
+            fun decode(text: String): Record? {
+                val lines = text.split('\n')
+                if (lines.size != 6 || lines[0] != VERSION || !DIGEST.matches(lines[1])) return null
+                val stamp = lines[5].takeIf { it.isNotEmpty() } ?: return null
+                return Record(
+                    lines[1],
+                    lines[2].toLongOrNull() ?: return null,
+                    lines[3].toLongOrNull() ?: return null,
+                    lines[4].toLongOrNull() ?: return null,
+                    stamp
+                )
+            }
+        }
+    }
+
+    private fun copyToBlob(source: Source, expectedDigest: String?, checkCancelled: () -> Unit): Pair<File, String?> {
         tmp.mkdirs()
         val partial = File.createTempFile("copy-", ".partial", tmp)
         try {
@@ -156,7 +366,7 @@ class ModelFileCache(
             blobs.mkdirs()
             moveAtomically(partial, blob)
             syncDirectory(blobs)
-            return blob
+            return blob to stampBefore
         } catch (error: Throwable) {
             partial.delete()
             throw error
@@ -198,6 +408,9 @@ class ModelFileCache(
 
     private fun isCompleteBlob(blob: File, size: Long) = blob.isFile && blob.length() == size
 
+    private fun isTrusted(blob: File, trustedBlobPath: String?) =
+        trustedBlobPath != null && File(trustedBlobPath).absoluteFile == blob.absoluteFile
+
     /**
      * Re-hashes a cached blob unless it is the caller's [trustedBlobPath]. A blob whose bytes
      * no longer match its digest name is deleted (unless leased) so the caller re-copies it.
@@ -209,7 +422,7 @@ class ModelFileCache(
         checkCancelled: () -> Unit,
         trustedBlobPath: String?
     ): Boolean {
-        if (trustedBlobPath != null && File(trustedBlobPath).absoluteFile == blob.absoluteFile) return true
+        if (isTrusted(blob, trustedBlobPath)) return true
         val actual = try {
             blob.inputStream().use { hashStream(it, size, null, checkCancelled) }
         } catch (_: SourceChangedException) {
@@ -224,21 +437,26 @@ class ModelFileCache(
 
     private fun blobFor(digest: String) = File(blobs, digest + BLOB_SUFFIX)
 
-    private fun readRef(file: File): String? = runCatching {
-        file.readText().trim().takeIf { DIGEST.matches(it) }
-    }.getOrNull()
+    private fun keyName(source: Source) = sha256Hex(source.key.encodeToByteArray())
 
-    private fun writeRef(file: File, digest: String) {
-        refs.mkdirs()
+    private fun readText(file: File): String? = runCatching { file.readText() }.getOrNull()
+
+    private fun readRef(file: File): String? = readText(file)?.trim()?.takeIf { DIGEST.matches(it) }
+
+    private fun writeRef(file: File, digest: String) = writeAtomically(refs, file, digest)
+
+    /** Staged in tmp/, fsynced and renamed, so readers see the old or the new text only. */
+    private fun writeAtomically(directory: File, file: File, text: String) {
+        directory.mkdirs()
         tmp.mkdirs()
-        val staged = File.createTempFile("ref-", ".partial", tmp)
+        val staged = File.createTempFile("meta-", ".partial", tmp)
         try {
             FileOutputStream(staged).use { output ->
-                output.write(digest.encodeToByteArray())
+                output.write(text.encodeToByteArray())
                 output.fd.sync()
             }
             moveAtomically(staged, file)
-            syncDirectory(refs)
+            syncDirectory(directory)
         } catch (error: Throwable) {
             staged.delete()
             throw error
@@ -320,6 +538,9 @@ class ModelFileCache(
         private val inProcessLocks = ConcurrentHashMap<String, ReentrantLock>()
         /** Open lease count per blob path, shared by all cache instances in the process. */
         private val leases = HashMap<String, Int>()
+
+        /** Test hook: open leases on [file] in this process. */
+        internal fun openLeases(file: File): Int = synchronized(leases) { leases[file.path] ?: 0 }
 
         private fun sha256Hex(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes).toHex()
         private fun ByteArray.toHex() = joinToString("") { "%02x".format(it) }

@@ -12,7 +12,9 @@ import com.local.voicenotes.concurrent.runCatchingCancellable
 import com.local.voicenotes.domain.ImportedModel
 import com.local.voicenotes.domain.LanguageOption
 import com.google.ai.edge.litert.CompiledModel
+import com.local.voicenotes.model.BackgroundVerification
 import com.local.voicenotes.model.ModelFileCache
+import com.local.voicenotes.model.VerifiedResultGate
 import com.google.ai.edge.litert.TensorBuffer
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -53,6 +55,11 @@ class LiteRtParakeetBackend internal constructor(
             Thread(task, "ParakeetLiteRt")
         }
         private val inferenceDispatcher = inferenceExecutor.asCoroutineDispatcher()
+        // Background integrity checks of fast-path model files. Never the inference thread;
+        // cached so the source and the blob can be hashed concurrently.
+        private val verificationExecutor = Executors.newCachedThreadPool { task ->
+            Thread(task, "ParakeetVerify").apply { isDaemon = true }
+        }
     }
 
     /** Job of the transcription currently running on the NPU thread; cancelled by [cancel]. */
@@ -63,6 +70,13 @@ class LiteRtParakeetBackend internal constructor(
     @Volatile private var preparedModelPath: String? = null
     /** Source change marker observed when [preparedSession] was verified; null = unknown. */
     @Volatile private var preparedStamp: String? = null
+    /**
+     * Non-null while [preparedSession] was built by the cold-start fast path from a blob whose
+     * bytes have not been verified in this process yet. Every result of such a session is
+     * gated on [preparedVerification] (see [VerifiedResultGate]).
+     */
+    @Volatile private var preparedRecorded: ModelFileCache.RecordedBlob? = null
+    @Volatile private var preparedVerification: BackgroundVerification? = null
     private val sessionLock = Any()
     private val assets by lazy { ParakeetAssets.load(context) }
     private val frontend by lazy { ParakeetFeatureExtractor(assets) }
@@ -89,7 +103,7 @@ class LiteRtParakeetBackend internal constructor(
                 // Preparation (selection, import, app start) re-verifies the source
                 // content, so an edited model is never served from a stale session.
                 val job = coroutineContext.job
-                sessionFor(model, verifySource = true) { job.ensureActive() }
+                sessionFor(model, verifySource = true, allowFastPath = true) { job.ensureActive() }
                 Unit
             }
         }
@@ -109,105 +123,132 @@ class LiteRtParakeetBackend internal constructor(
         activeCall = callJob
         try {
             val totalStarted = SystemClock.elapsedRealtimeNanos()
-            // A cheap provider stamp decides whether the prepared session may be reused
-            // as-is; a changed or unavailable stamp forces a full content re-verification.
-            val verify = sourceMayHaveChanged(model)
-            val session = sessionFor(model, verifySource = verify) { callJob.ensureActive() }
-            Log.i(TAG, "reusePreparedSession=${!verify} accelerator=${session.target.label} audioSamples=${pcm16KhzMono.size}")
-            activeSession = session
-            try {
-                val emitted = ArrayList<Int>()
-                var predictor: Predictor? = null
-                var frontendNanos = 0L
-                var encoderNanos = 0L
-                var decoderNanos = 0L
-                var decoderCalls = 0
-                val chunkCount = (pcm16KhzMono.size + ParakeetFeatureExtractor.CHUNK_SAMPLES - 1) /
-                    ParakeetFeatureExtractor.CHUNK_SAMPLES
-                repeat(chunkCount) { chunk ->
+            // A result is only returned once the bytes it was computed from are verified; a
+            // failed background verification discards the session and re-runs once on a
+            // session from the full (re-hashing) path.
+            VerifiedResultGate.run(
+                checkCancelled = { callJob.ensureActive() },
+                onUnverified = { outcome ->
+                    Log.w(TAG, "model verification outcome=$outcome; discarding session and re-running on the verified path")
+                    synchronized(sessionLock) { if (preparedRecorded != null) discardPreparedLocked() }
+                },
+                onAwaited = { outcome, waitMillis ->
+                    Log.i(TAG, "result gated on verification outcome=$outcome wait=${waitMillis}ms")
+                }
+            ) { retry ->
+                // A cheap provider stamp decides whether the prepared session may be reused
+                // as-is; a changed or unavailable stamp forces a full content re-verification.
+                val verify = retry || sourceMayHaveChanged(model)
+                val prepared = sessionFor(model, verifySource = verify, allowFastPath = !retry) { callJob.ensureActive() }
+                Log.i(
+                    TAG,
+                    "reusePreparedSession=${!verify} retry=$retry verificationPending=${prepared.verification != null} " +
+                        "accelerator=${prepared.session.target.label} audioSamples=${pcm16KhzMono.size}"
+                )
+                VerifiedResultGate.Attempt(infer(prepared.session, pcm16KhzMono, onProgress), prepared.verification)
+            }.also { Log.i(TAG, "transcribe total=${elapsedMillis(totalStarted)}ms") }
+        } catch (cancellation: CancellationException) {
+            // Stops a pending check and releases its lease; the next use restarts it.
+            preparedVerification?.cancel()
+            throw cancellation
+        } finally {
+            if (activeCall === callJob) activeCall = null
+        }
+    }
+
+    private suspend fun infer(session: Session, pcm16KhzMono: FloatArray, onProgress: (Float) -> Unit): String {
+        val totalStarted = SystemClock.elapsedRealtimeNanos()
+        activeSession = session
+        try {
+            val emitted = ArrayList<Int>()
+            var predictor: Predictor? = null
+            var frontendNanos = 0L
+            var encoderNanos = 0L
+            var decoderNanos = 0L
+            var decoderCalls = 0
+            val chunkCount = (pcm16KhzMono.size + ParakeetFeatureExtractor.CHUNK_SAMPLES - 1) /
+                ParakeetFeatureExtractor.CHUNK_SAMPLES
+            repeat(chunkCount) { chunk ->
+                checkActive()
+                val frontendStarted = SystemClock.elapsedRealtimeNanos()
+                val features = frontend.extract(
+                    pcm16KhzMono,
+                    chunk * ParakeetFeatureExtractor.CHUNK_SAMPLES
+                )
+                frontendNanos += SystemClock.elapsedRealtimeNanos() - frontendStarted
+                checkActive()
+                val encoderStarted = SystemClock.elapsedRealtimeNanos()
+                val encoder = session.encode(features)
+                encoderNanos += SystemClock.elapsedRealtimeNanos() - encoderStarted
+                val initialDecoderStarted = SystemClock.elapsedRealtimeNanos()
+                predictor = session.bindEncoder(encoder, predictor)
+                decoderNanos += SystemClock.elapsedRealtimeNanos() - initialDecoderStarted
+                decoderCalls++
+                var frame = 0
+                var inner = 0
+                while (frame < ENCODER_FRAMES) {
                     checkActive()
-                    val frontendStarted = SystemClock.elapsedRealtimeNanos()
-                    val features = frontend.extract(
-                        pcm16KhzMono,
-                        chunk * ParakeetFeatureExtractor.CHUNK_SAMPLES
-                    )
-                    frontendNanos += SystemClock.elapsedRealtimeNanos() - frontendStarted
-                    checkActive()
-                    val encoderStarted = SystemClock.elapsedRealtimeNanos()
-                    val encoder = session.encode(features)
-                    encoderNanos += SystemClock.elapsedRealtimeNanos() - encoderStarted
-                    val initialDecoderStarted = SystemClock.elapsedRealtimeNanos()
-                    predictor = session.bindEncoder(encoder, predictor)
-                    decoderNanos += SystemClock.elapsedRealtimeNanos() - initialDecoderStarted
-                    decoderCalls++
-                    var frame = 0
-                    var inner = 0
-                    while (frame < ENCODER_FRAMES) {
-                        checkActive()
-                        val logits = predictor!!.logits
-                        val row = frame * LOGITS
-                        var token = 0
-                        var tokenValue = logits[row]
-                        for (id in 1 until VOCAB_WITH_BLANK) {
-                            val value = logits[row + id]
-                            if (value > tokenValue) {
-                                tokenValue = value
-                                token = id
-                            }
+                    val logits = predictor!!.logits
+                    val row = frame * LOGITS
+                    var token = 0
+                    var tokenValue = logits[row]
+                    for (id in 1 until VOCAB_WITH_BLANK) {
+                        val value = logits[row + id]
+                        if (value > tokenValue) {
+                            tokenValue = value
+                            token = id
                         }
-                        var duration = 0
-                        var durationValue = logits[row + VOCAB_WITH_BLANK]
-                        for (id in 1 until 5) {
-                            val value = logits[row + VOCAB_WITH_BLANK + id]
-                            if (value > durationValue) {
-                                durationValue = value
-                                duration = id
-                            }
+                    }
+                    var duration = 0
+                    var durationValue = logits[row + VOCAB_WITH_BLANK]
+                    for (id in 1 until 5) {
+                        val value = logits[row + VOCAB_WITH_BLANK + id]
+                        if (value > durationValue) {
+                            durationValue = value
+                            duration = id
                         }
-                        if (token == BLANK) {
-                            if (duration > 0) {
-                                frame += duration
-                                inner = 0
-                            } else {
-                                inner++
-                                if (inner >= MAX_SYMBOLS_PER_FRAME) {
-                                    frame++
-                                    inner = 0
-                                }
-                            }
+                    }
+                    if (token == BLANK) {
+                        if (duration > 0) {
+                            frame += duration
+                            inner = 0
                         } else {
-                            emitted += token
-                            val decoderStarted = SystemClock.elapsedRealtimeNanos()
-                            predictor = session.advance(encoder, token, predictor!!)
-                            decoderNanos += SystemClock.elapsedRealtimeNanos() - decoderStarted
-                            decoderCalls++
-                            if (duration > 0) {
-                                frame += duration
+                            inner++
+                            if (inner >= MAX_SYMBOLS_PER_FRAME) {
+                                frame++
                                 inner = 0
-                            } else {
-                                inner++
-                                if (inner >= MAX_SYMBOLS_PER_FRAME) {
-                                    frame++
-                                    inner = 0
-                                }
+                            }
+                        }
+                    } else {
+                        emitted += token
+                        val decoderStarted = SystemClock.elapsedRealtimeNanos()
+                        predictor = session.advance(encoder, token, predictor!!)
+                        decoderNanos += SystemClock.elapsedRealtimeNanos() - decoderStarted
+                        decoderCalls++
+                        if (duration > 0) {
+                            frame += duration
+                            inner = 0
+                        } else {
+                            inner++
+                            if (inner >= MAX_SYMBOLS_PER_FRAME) {
+                                frame++
+                                inner = 0
                             }
                         }
                     }
-                    onProgress((chunk + 1f) / chunkCount)
                 }
-                detokenize(emitted).also {
-                    Log.i(
-                        TAG,
-                        "chunks=$chunkCount frontend=${frontendNanos / 1_000_000}ms " +
-                            "encode=${encoderNanos / 1_000_000}ms decode=${decoderNanos / 1_000_000}ms " +
-                            "decodeCalls=$decoderCalls tokens=${emitted.size} total=${elapsedMillis(totalStarted)}ms"
-                    )
-                }
-            } finally {
-                activeSession = null
+                onProgress((chunk + 1f) / chunkCount)
+            }
+            return detokenize(emitted).also {
+                Log.i(
+                    TAG,
+                    "chunks=$chunkCount frontend=${frontendNanos / 1_000_000}ms " +
+                        "encode=${encoderNanos / 1_000_000}ms decode=${decoderNanos / 1_000_000}ms " +
+                        "decodeCalls=$decoderCalls tokens=${emitted.size} inference=${elapsedMillis(totalStarted)}ms"
+                )
             }
         } finally {
-            if (activeCall === callJob) activeCall = null
+            activeSession = null
         }
     }
 
@@ -218,52 +259,138 @@ class LiteRtParakeetBackend internal constructor(
     private fun elapsedMillis(startedNanos: Long): Long =
         (SystemClock.elapsedRealtimeNanos() - startedNanos) / 1_000_000
 
+    private class Prepared(
+        val session: Session,
+        /** Non-null when [session]'s bytes are not verified yet: results must await it. */
+        val verification: BackgroundVerification?
+    )
+
     /**
      * Returns the session for [model]. Without [verifySource] an existing session for the
      * same model id is reused as-is (per-transcription fast path). With it, the source is
      * re-hashed and the session is only kept if it was built from the identical bytes.
      * A cached blob that would back a *new* session is re-hashed as well, so same-length
      * corruption of the private copy is detected instead of loaded.
+     *
+     * Cold-start fast path ([allowFastPath], no live session for the model): when the cache's
+     * verified record still matches the provider stamp and the blob's length/mtime, the
+     * session is built without hashing and a background verification starts in parallel;
+     * the returned [Prepared.verification] must gate every result.
      */
     private fun sessionFor(
         model: ImportedModel,
         verifySource: Boolean,
+        allowFastPath: Boolean,
         checkCancelled: () -> Unit
-    ): Session = synchronized(sessionLock) {
+    ): Prepared = synchronized(sessionLock) {
         val existing = preparedSession
-        if (existing != null && preparedModelId == model.id && !verifySource) return@synchronized existing
+        val sameModel = existing != null && preparedModelId == model.id
+        val recorded = preparedRecorded
+        if (existing != null && sameModel && recorded != null) {
+            // Unverified fast-path session: reusable while its check has not failed and the
+            // stamp still equals the recorded one (the pending check re-hashes the source).
+            val failed = preparedVerification?.result == BackgroundVerification.Outcome.FAILED
+            val stampMatches = !verifySource || (allowFastPath && sourceStamp(model) == recorded.stamp)
+            if (!failed && stampMatches) return@synchronized Prepared(existing, pendingVerificationLocked(recorded))
+            // Never reuse it after a full resolution: a corrupt blob is replaced under the same
+            // path, so path equality would not prove what this session loaded.
+            discardPreparedLocked()
+        } else if (existing != null && sameModel && !verifySource) {
+            return@synchronized Prepared(existing, null)
+        }
+        if (allowFastPath && !(preparedSession != null && preparedModelId == model.id)) {
+            fastPathSession(model, checkCancelled)?.let { return@synchronized it }
+        }
+        val current = preparedSession
         val modelFileStarted = SystemClock.elapsedRealtimeNanos()
         val stampBefore = sourceStamp(model)
-        val trustedPath = if (existing != null && preparedModelId == model.id) preparedModelPath else null
+        val trustedPath = if (current != null && preparedModelId == model.id) preparedModelPath else null
         val modelFile = try {
             openModelFile(model, checkCancelled, trustedPath)
         } catch (error: Throwable) {
             // Failed or cancelled verification must not leave a possibly stale session
             // behind for the next transcription to reuse unchecked.
-            existing?.close()
-            preparedSession = null
-            preparedModelId = null
-            preparedModelPath = null
-            preparedStamp = null
+            discardPreparedLocked()
             throw error
         }
         val modelFileMillis = elapsedMillis(modelFileStarted)
-        if (existing != null && preparedModelId == model.id && preparedModelPath == modelFile.path) {
+        if (current != null && preparedModelId == model.id && preparedModelPath == modelFile.path) {
             Log.i(TAG, "verified modelFile=${modelFileMillis}ms; reusing session model=${model.displayName}")
             modelFile.close() // the existing session keeps its own lease on the same blob
             preparedStamp = stampBefore
-            return@synchronized existing
+            return@synchronized Prepared(current, null)
         }
-        existing?.close()
-        preparedSession = null
-        preparedModelId = null
-        preparedModelPath = null
-        preparedStamp = null
+        discardPreparedLocked()
         val sessionStarted = SystemClock.elapsedRealtimeNanos()
+        val created = createSession(model, modelFile)
+        val sessionMillis = elapsedMillis(sessionStarted)
+        preparedModelId = model.id
+        preparedModelPath = modelFile.path
+        preparedStamp = stampBefore
+        preparedSession = created
+        Log.i(
+            TAG,
+            "prepared accelerator=${created.target.label} modelFile=${modelFileMillis}ms session=${sessionMillis}ms " +
+                "fastPath=false model=${model.displayName}"
+        )
+        Prepared(created, null)
+    }
+
+    /**
+     * Builds a session on the recorded blob without hashing, or returns null to take the full
+     * path. Session creation runs while the background verification hashes source and blob.
+     * Residual risk (accepted, gated): a source rewritten with identical size AND identical
+     * provider lastModified, or a blob corrupted with its length/mtime preserved, is loaded
+     * unverified here and only caught by the background verification, which still gates
+     * every result before it is returned.
+     */
+    private fun fastPathSession(model: ImportedModel, checkCancelled: () -> Unit): Prepared? {
+        val uri = Uri.parse(model.path)
+        if (uri.scheme != "content") return null
+        val modelFileStarted = SystemClock.elapsedRealtimeNanos()
+        val recorded = try {
+            modelCache.acquireRecorded(SafModelSource(model, uri), checkCancelled)
+        } catch (error: Exception) {
+            if (error is CancellationException) throw error
+            Log.w(TAG, "fast path unavailable: ${error.message}")
+            null
+        } ?: return null
+        val modelFileMillis = elapsedMillis(modelFileStarted)
+        discardPreparedLocked()
+        val verification = recorded.startVerification(verificationExecutor, ::onVerificationFinished)
+        val modelFile = ModelFile(recorded.file.absolutePath, null, recorded.lease)
+        val sessionStarted = SystemClock.elapsedRealtimeNanos()
+        val created = try {
+            createSession(model, modelFile)
+        } catch (error: Throwable) {
+            verification.cancel()
+            if (error is VirtualMachineError || error is CancellationException) throw error
+            // Possibly caused by unverified bytes: let the full path re-verify and retry.
+            Log.w(TAG, "fast-path session failed; falling back to full verification", error)
+            recorded.invalidateRecord()
+            return null
+        }
+        val sessionMillis = elapsedMillis(sessionStarted)
+        preparedModelId = model.id
+        preparedModelPath = modelFile.path
+        preparedStamp = recorded.stamp
+        preparedSession = created
+        preparedRecorded = recorded
+        preparedVerification = verification
+        Log.i(
+            TAG,
+            "prepared accelerator=${created.target.label} modelFile=${modelFileMillis}ms session=${sessionMillis}ms " +
+                "fastPath=true model=${model.displayName}"
+        )
+        return Prepared(created, verification)
+    }
+
+    /** Closes [modelFile] on failure. */
+    private fun createSession(model: ImportedModel, modelFile: ModelFile): Session {
         // Decided by the model's backend only. NPU failures are reported as NPU
         // failures; there is deliberately no automatic CPU fallback.
         val target = ExecutionTarget.forBackend(model.backend)
-        val created = try {
+        return try {
             Session(environments, modelFile, target)
         } catch (error: Throwable) {
             modelFile.close()
@@ -279,13 +406,44 @@ class LiteRtParakeetBackend internal constructor(
                 error
             )
         }
-        val sessionMillis = elapsedMillis(sessionStarted)
-        preparedModelId = model.id
-        preparedModelPath = modelFile.path
-        preparedStamp = stampBefore
-        preparedSession = created
-        Log.i(TAG, "prepared accelerator=${target.label} modelFile=${modelFileMillis}ms session=${sessionMillis}ms model=${model.displayName}")
-        created
+    }
+
+    /** The running check of the unverified session, restarted if a cancel stopped it. */
+    private fun pendingVerificationLocked(recorded: ModelFileCache.RecordedBlob): BackgroundVerification {
+        val current = preparedVerification
+        if (current != null &&
+            (!current.isCancelRequested || current.result == BackgroundVerification.Outcome.VERIFIED)
+        ) return current
+        return recorded.startVerification(verificationExecutor, ::onVerificationFinished)
+            .also { preparedVerification = it }
+    }
+
+    private fun onVerificationFinished(
+        verification: BackgroundVerification,
+        outcome: BackgroundVerification.Outcome,
+        millis: Long
+    ) {
+        Log.i(TAG, "background verification ok=${outcome == BackgroundVerification.Outcome.VERIFIED} outcome=$outcome in ${millis}ms")
+        if (outcome != BackgroundVerification.Outcome.VERIFIED) return
+        synchronized(sessionLock) {
+            if (preparedVerification === verification) {
+                // From now on the session counts as verified, exactly like a full-path one.
+                preparedRecorded = null
+                preparedVerification = null
+            }
+        }
+    }
+
+    /** Must hold [sessionLock]. Cancels a pending check and closes the prepared session. */
+    private fun discardPreparedLocked() {
+        preparedVerification?.cancel()
+        preparedVerification = null
+        preparedRecorded = null
+        preparedSession?.close()
+        preparedSession = null
+        preparedModelId = null
+        preparedModelPath = null
+        preparedStamp = null
     }
 
     private fun detokenize(ids: List<Int>): String {
@@ -322,6 +480,9 @@ class LiteRtParakeetBackend internal constructor(
      */
     override fun close() {
         cancel()
+        // Without the session lock (may be held for seconds on the inference thread): stops
+        // the pending check now; closeSession() below cleans up the rest in order.
+        preparedVerification?.cancel()
         inferenceExecutor.execute { closeSession() }
     }
 
@@ -330,11 +491,7 @@ class LiteRtParakeetBackend internal constructor(
         activeSession = null
         synchronized(sessionLock) {
             if (preparedSession !== active) active?.close()
-            preparedSession?.close()
-            preparedSession = null
-            preparedModelId = null
-            preparedModelPath = null
-            preparedStamp = null
+            discardPreparedLocked()
         }
     }
 
@@ -384,7 +541,8 @@ class LiteRtParakeetBackend internal constructor(
         return if (uri.scheme == "content") {
             // CompiledModel's native loader requires a regular filesystem
             // path; unlike Interpreter it cannot consume a SAF descriptor.
-            // The cache is content-addressed: the source is hashed on every call.
+            // The cache is content-addressed: the source is hashed on every call of this
+            // full path (the cold-start fast path is fastPathSession()).
             val lease = modelCache.acquire(SafModelSource(model, uri), trustedBlobPath, checkCancelled)
             ModelFile(lease.file.absolutePath, null, lease)
         } else {
