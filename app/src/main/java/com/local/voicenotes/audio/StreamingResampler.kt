@@ -31,7 +31,7 @@ class StreamingResampler(
 ) {
     companion object {
         const val DEFAULT_CUTOFF_HZ = 7_400.0
-        const val DEFAULT_ZERO_CROSSINGS = 20
+        const val DEFAULT_ZERO_CROSSINGS = 12
         const val DEFAULT_KAISER_BETA = 8.0
         private const val MAX_EXACT_PHASES = 1024
         private const val INTERP_PHASES = 1024
