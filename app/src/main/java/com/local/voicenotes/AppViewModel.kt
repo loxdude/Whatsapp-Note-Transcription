@@ -1,111 +1,87 @@
 package com.local.voicenotes
 
 import android.app.Application
-import android.content.Intent
 import android.net.Uri
-import android.provider.OpenableColumns
-import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.local.voicenotes.audio.AndroidAudioDecoder
-import com.local.voicenotes.domain.ImportedModel
 import com.local.voicenotes.domain.LanguageOption
-import com.local.voicenotes.inference.LiteRtParakeetBackend
+import com.local.voicenotes.history.HistoryEntry
 import com.local.voicenotes.inference.MistralApiKeyStatus
-import com.local.voicenotes.inference.MistralApiKeyStore
-import com.local.voicenotes.inference.MistralTranscriptionBackend
-import com.local.voicenotes.model.ModelRepository
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.ExperimentalCoroutinesApi
+import com.local.voicenotes.share.SharedAudioDecision
+import com.local.voicenotes.share.decideSharedAudio
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 /**
- * Android adapter around [TranscriptionCoordinator], which owns the lifecycle and state rules.
- * This class only resolves Android resources (URIs, permissions, preferences).
+ * Thin Android adapter exposing the app-scoped [TranscriptionCoordinator] (owned by
+ * [AppGraph], not by this ViewModel) plus UI-only state. Clearing this ViewModel never
+ * cancels running work or closes backends; the foreground service keeps work alive.
  */
 class AppViewModel(application: Application) : AndroidViewModel(application) {
     companion object {
-        private const val TAG = "VoiceNotesBenchmark"
         private const val CLOUD_CONSENT = "cloud_upload_consent"
     }
-    private val preferences = application.getSharedPreferences("audio_selection", 0)
-    private val repository = ModelRepository(application)
-    private val decoder = AndroidAudioDecoder(application.contentResolver)
-    private val liteRtBackend = LiteRtParakeetBackend(application)
-    private val mistralBackend = MistralTranscriptionBackend(application)
-    private val mistralApiKeyStore = MistralApiKeyStore(application)
-    private val coordinator = TranscriptionCoordinator(
-        scope = viewModelScope,
-        catalog = object : ModelCatalog {
-            override suspend fun models(): List<ImportedModel> = repository.models()
-            override suspend fun selectedModelId(): String? = repository.selectedModelId()
-            override suspend fun select(id: String) { repository.select(id) }
-            override suspend fun import(source: String, onProgress: (Float) -> Unit): ImportedModel =
-                repository.import(Uri.parse(source), onProgress)
-        },
-        decoder = PcmDecoder { source, onProgress -> decoder.decode(Uri.parse(source), onProgress) },
-        backends = mapOf(
-            "litert-qnn" to liteRtBackend,
-            "litert-cpu" to liteRtBackend,
-            "litert-qnn-sm8650" to liteRtBackend,
-            "mistral-api" to mistralBackend
-        ),
-        log = { message -> Log.i(TAG, message) }
-    )
+    private val graph = application.appGraph
+    private val coordinator = graph.coordinator
     val state: StateFlow<AppUiState> = coordinator.state
 
-    /**
-     * Content-provider queries and grant bookkeeping run off the main thread, one at a time, so
-     * rapid audio picks are still applied in the order the user made them.
-     */
-    @OptIn(ExperimentalCoroutinesApi::class)
-    private val audioDispatcher = Dispatchers.IO.limitedParallelism(1)
+    /** Completed transcripts, newest first. */
+    val history: StateFlow<List<HistoryEntry>> = graph.history.entries
+
+    private val mutableShowHistory = MutableStateFlow(false)
+    val showHistory: StateFlow<Boolean> = mutableShowHistory.asStateFlow()
 
     private val consentPreferences = application.getSharedPreferences("privacy", 0)
     private val mutableCloudConsent = MutableStateFlow(consentPreferences.getBoolean(CLOUD_CONSENT, false))
     /** Whether the user agreed that audio may be uploaded to Mistral for cloud transcription. */
     val cloudUploadConsent: StateFlow<Boolean> = mutableCloudConsent.asStateFlow()
 
-    init {
-        preferences.getString("uri", null)?.let { saved ->
-            runCatching { setAudio(Uri.parse(saved), persist = false) }
-        }
-        coordinator.refreshModels()
-    }
+    private val mutableConsentPrompt = MutableStateFlow(false)
+    /** Set when shared audio waits for upload consent; the UI shows the consent dialog. */
+    val consentPrompt: StateFlow<Boolean> = mutableConsentPrompt.asStateFlow()
+
+    private var shareJob: Job? = null
 
     fun refreshModels() = coordinator.refreshModels()
 
     fun setAudio(uri: Uri, persist: Boolean = true) {
-        viewModelScope.launch(audioDispatcher) {
-            val resolver = getApplication<Application>().contentResolver
-            if (persist) {
-                val previous = preferences.getString("uri", null)
-                runCatching {
-                    resolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                }
-                preferences.edit().putString("uri", uri.toString()).apply()
-                // Android caps persisted grants per app; release the previous audio grant so
-                // repeated picks cannot evict the grant of an imported model.
-                if (previous != null && previous != uri.toString() &&
-                    state.value.models.none { it.path == previous }
-                ) {
-                    runCatching {
-                        resolver.releasePersistableUriPermission(
-                            Uri.parse(previous), Intent.FLAG_GRANT_READ_URI_PERMISSION
-                        )
-                    }
-                }
+        shareJob?.cancel()
+        graph.setAudio(uri, persist)
+    }
+
+    /**
+     * Loads audio shared from another app and starts transcribing it once the model list is
+     * loaded and no preparation is running. Starting right away (while the receiving
+     * activity, and with it the temporary read grant, is alive) matters: the audio is read
+     * at transcription start. Cloud models still require consent: the dialog is requested
+     * instead of uploading. Without a usable model the audio is only loaded.
+     */
+    fun onSharedAudio(uri: Uri) {
+        shareJob?.cancel()
+        mutableShowHistory.value = false
+        val source = uri.toString()
+        shareJob = viewModelScope.launch {
+            graph.setAudio(uri, persist = true).join()
+            graph.initialRefresh.join()
+            val decision = state
+                .map { decideSharedAudio(it, source, cloudUploadConsent.value) }
+                .first { it != SharedAudioDecision.WAIT }
+            when (decision) {
+                SharedAudioDecision.TRANSCRIBE -> transcribe()
+                SharedAudioDecision.NEEDS_CONSENT -> mutableConsentPrompt.value = true
+                SharedAudioDecision.ABORT, SharedAudioDecision.NO_USABLE_MODEL,
+                SharedAudioDecision.WAIT -> Unit
             }
-            val name = runCatching {
-                resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
-                    if (cursor.moveToFirst()) cursor.getString(0) else null
-                }
-            }.getOrNull() ?: uri.lastPathSegment ?: "Selected audio"
-            coordinator.setAudio(uri.toString(), name)
         }
+    }
+
+    fun consentPromptShown() {
+        mutableConsentPrompt.value = false
     }
 
     fun grantCloudUploadConsent() {
@@ -120,7 +96,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun importModel(uri: Uri) {
-        coordinator.importModel(uri.toString())
+        if (coordinator.importModel(uri.toString())) graph.startWorkService()
     }
 
     /**
@@ -128,25 +104,35 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
      * the UI asks first, this is the enforcement point.
      */
     fun transcribe(): Boolean {
-        if (state.value.selectedModel?.backend == "mistral-api" && !cloudUploadConsent.value) return false
-        return coordinator.transcribe()
+        if (state.value.selectedModel?.isCloud() == true && !cloudUploadConsent.value) return false
+        val started = coordinator.transcribe()
+        // Called synchronously from the user's tap (or the share), i.e. while visible.
+        if (started) graph.startWorkService()
+        return started
     }
 
-    fun cancel() = coordinator.cancel()
+    fun cancel() {
+        shareJob?.cancel()
+        coordinator.cancel()
+    }
 
     fun editTranscript(value: String) = coordinator.editTranscript(value)
 
+    fun setShowHistory(show: Boolean) {
+        mutableShowHistory.value = show
+    }
+
+    fun deleteHistoryEntry(id: String) = graph.history.delete(id)
+
+    /** Persists pending transcript edits now (the app is going to the background). */
+    fun flushHistory() = graph.history.flush()
+
     /** Saves the key; returns an error message for the UI instead of throwing on Keystore failure. */
     fun setApiKey(apiKey: String): String? =
-        mistralApiKeyStore.set(apiKey.trim()).exceptionOrNull()?.let { "Could not save the API key: ${it.message}" }
+        graph.mistralApiKeyStore.set(apiKey.trim()).exceptionOrNull()?.let { "Could not save the API key: ${it.message}" }
 
     /** Key status for the UI; never decrypts or exposes the stored key. */
-    fun apiKeyStatus(): MistralApiKeyStatus = mistralApiKeyStore.status()
+    fun apiKeyStatus(): MistralApiKeyStatus = graph.mistralApiKeyStore.status()
 
-    override fun onCleared() {
-        // viewModelScope is already cancelled here; dispose() additionally discards any late
-        // writes and closes each backend once (LiteRT closes on its NPU thread after inference).
-        coordinator.dispose()
-        super.onCleared()
-    }
+    // No onCleared(): the coordinator and backends belong to the process, not this ViewModel.
 }

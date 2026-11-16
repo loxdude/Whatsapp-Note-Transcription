@@ -23,6 +23,10 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
+import java.util.UUID
+
+/** Sample rate of the PCM produced by [PcmDecoder]. */
+private const val PCM_SAMPLE_RATE = 16_000L
 
 data class AppUiState(
     val models: List<ImportedModel> = emptyList(),
@@ -33,7 +37,13 @@ data class AppUiState(
     val language: LanguageOption = LanguageOption.AUTO,
     val progress: TranscriptionProgress = TranscriptionProgress.Idle,
     val transcript: String = "",
-    val elapsedMillis: Long = 0L
+    val elapsedMillis: Long = 0L,
+    /**
+     * Identifies the completed transcription currently shown in [transcript] (it is passed to
+     * [TranscriptionCoordinator]'s completion callback). Null while no completed transcript
+     * is shown, e.g. after new audio was selected or a new run started.
+     */
+    val transcriptId: String? = null
 ) {
     val busy: Boolean get() = progress is TranscriptionProgress.Importing ||
         progress is TranscriptionProgress.Preparing || progress is TranscriptionProgress.Decoding ||
@@ -72,6 +82,20 @@ interface ModelCatalog {
     suspend fun import(source: String, onProgress: (Float) -> Unit): ImportedModel
 }
 
+/** A successfully completed transcription, reported once to the completion callback. */
+data class CompletedTranscript(
+    val id: String,
+    val audioUri: String,
+    val audioName: String,
+    val modelId: String,
+    val modelName: String,
+    val text: String,
+    val language: LanguageOption,
+    val processingMillis: Long,
+    /** Duration of the decoded audio; null when the backend consumed the file directly. */
+    val audioDurationMillis: Long?
+)
+
 fun interface PcmDecoder {
     /** Decodes [source] (a URI string) to 16 kHz mono PCM. Must honour coroutine cancellation. */
     suspend fun decode(source: String, onProgress: (Float) -> Unit): FloatArray
@@ -99,7 +123,16 @@ class TranscriptionCoordinator(
     private val backends: Map<String, TranscriptionBackend>,
     private val monotonicMillis: () -> Long = { System.nanoTime() / 1_000_000 },
     private val clockInterval: Duration = 250.milliseconds,
-    private val log: (String) -> Unit = {}
+    private val log: (String) -> Unit = {},
+    private val newTranscriptId: () -> String = { UUID.randomUUID().toString() },
+    /**
+     * Called (outside the state lock, on the transcription coroutine) after a transcription's
+     * Completed state was published. Never called for cancelled or superseded runs. Must not
+     * block; the app persists the transcript history from here, independent of any UI.
+     */
+    private val onTranscriptCompleted: (CompletedTranscript) -> Unit = {},
+    /** Called after the user edited the transcript of completed transcription [id]. */
+    private val onTranscriptEdited: (id: String, text: String) -> Unit = { _, _ -> }
 ) {
     private enum class Kind { IMPORT, TRANSCRIBE }
 
@@ -163,7 +196,7 @@ class TranscriptionCoordinator(
             if (running != null) generation++
             write {
                 it.copy(
-                    audioUri = source, audioName = name, transcript = "",
+                    audioUri = source, audioName = name, transcript = "", transcriptId = null,
                     progress = if (running != null || !it.busy) TranscriptionProgress.Idle else it.progress
                 )
             }
@@ -174,7 +207,13 @@ class TranscriptionCoordinator(
 
     fun setLanguage(language: LanguageOption) = locked { write { it.copy(language = language) } }
 
-    fun editTranscript(value: String) = locked { write { it.copy(transcript = value) } }
+    fun editTranscript(value: String) {
+        val id = locked {
+            write { it.copy(transcript = value) }
+            mutableState.value.transcriptId
+        } ?: return
+        runCatching { onTranscriptEdited(id, value) }.onFailure { log("Transcript edit hook failed: ${it.message}") }
+    }
 
     /**
      * Selects an enabled model and prepares it, superseding any earlier preparation.
@@ -363,10 +402,13 @@ class TranscriptionCoordinator(
             val token = ++generation
             // Set synchronously so a second tap cannot start a concurrent run.
             write {
-                it.copy(progress = TranscriptionProgress.Preparing, transcript = "", elapsedMillis = 0)
+                it.copy(
+                    progress = TranscriptionProgress.Preparing, transcript = "", transcriptId = null,
+                    elapsedMillis = 0
+                )
             }
             scope.launch(start = CoroutineStart.LAZY) {
-                runTranscription(token, model, audio, snapshot.language)
+                runTranscription(token, model, audio, snapshot.audioName, snapshot.language)
             }.also { trackForeground(it, Kind.TRANSCRIBE, token) }
         }
         job.start()
@@ -377,6 +419,7 @@ class TranscriptionCoordinator(
         token: Long,
         model: ImportedModel,
         audio: String,
+        audioName: String,
         language: LanguageOption
     ) = coroutineScope {
         val started = monotonicMillis()
@@ -426,8 +469,23 @@ class TranscriptionCoordinator(
                 processingDurationMillis = elapsed,
                 modelId = model.id
             )
-            finishIfCurrent(token) {
-                it.copy(transcript = text, elapsedMillis = elapsed, progress = TranscriptionProgress.Completed(result))
+            val transcriptId = newTranscriptId()
+            val accepted = finishIfCurrent(token) {
+                it.copy(
+                    transcript = text, transcriptId = transcriptId, elapsedMillis = elapsed,
+                    progress = TranscriptionProgress.Completed(result)
+                )
+            }
+            if (accepted) {
+                val completed = CompletedTranscript(
+                    id = transcriptId, audioUri = audio, audioName = audioName, modelId = model.id,
+                    modelName = model.displayName, text = text, language = language,
+                    processingMillis = elapsed,
+                    audioDurationMillis = if (backend is UriTranscriptionBackend) null
+                    else audioSamples * 1000L / PCM_SAMPLE_RATE
+                )
+                runCatching { onTranscriptCompleted(completed) }
+                    .onFailure { log("Transcript completion hook failed: ${it.message}") }
             }
             log(
                 "audioDecode=${audioDecodeMillis}ms total=${monotonicMillis() - started}ms " +

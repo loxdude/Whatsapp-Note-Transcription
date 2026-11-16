@@ -1,0 +1,135 @@
+package com.local.voicenotes.work
+
+import android.app.Service
+import android.content.Context
+import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.os.Build
+import android.os.IBinder
+import android.util.Log
+import androidx.core.app.NotificationManagerCompat
+import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
+import com.local.voicenotes.AppUiState
+import com.local.voicenotes.appGraph
+import com.local.voicenotes.voiceNotesApp
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+
+/**
+ * Keeps the process in the foreground while an import or transcription runs, so the work in
+ * the app-scoped coordinator survives the activity being backgrounded or swiped away.
+ *
+ * The service holds no work itself: it mirrors the coordinator state into an ongoing
+ * notification ([WorkNotificationPolicy]) and stops itself as soon as no work is running.
+ * Type: mediaProcessing on API 35+, dataSync on API 31-34 (mediaProcessing does not exist).
+ */
+class TranscriptionService : Service() {
+    companion object {
+        private const val TAG = "VoiceNotesBenchmark"
+
+        /**
+         * Starts the service. Only allowed while the app is visible; returns false if the
+         * system refused (e.g. ForegroundServiceStartNotAllowedException), in which case the
+         * work still runs, just without background protection.
+         */
+        fun start(context: Context): Boolean = try {
+            ContextCompat.startForegroundService(context, Intent(context, TranscriptionService::class.java))
+            true
+        } catch (refused: IllegalStateException) {
+            Log.w(TAG, "Could not start the transcription service", refused)
+            false
+        } catch (refused: SecurityException) {
+            Log.w(TAG, "Could not start the transcription service", refused)
+            false
+        }
+
+        private val foregroundType: Int
+            get() = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROCESSING
+            } else {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            }
+    }
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var observer: Job? = null
+    private var latestStartId = 0
+    private var inForeground = false
+    private var shownNotice: OngoingNotice? = null
+    private var lastKind: WorkKind? = null
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        latestStartId = startId
+        val state = appGraph.coordinator.state.value
+        // startForeground must follow every startForegroundService(), even if the work has
+        // already finished; the observer below stops the service again right away then.
+        val notice = WorkNotificationPolicy.ongoing(state)
+            ?: OngoingNotice(WorkKind.TRANSCRIPTION, "Voice notes", "Working", null)
+        try {
+            ServiceCompat.startForeground(
+                this, WorkNotifications.ONGOING_ID, WorkNotifications.ongoing(this, notice), foregroundType
+            )
+            inForeground = true
+            shownNotice = notice
+        } catch (refused: RuntimeException) {
+            Log.w(TAG, "startForeground refused", refused)
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
+        if (observer == null) {
+            observer = scope.launch { appGraph.coordinator.state.collect(::onState) }
+        }
+        return START_NOT_STICKY
+    }
+
+    private fun onState(state: AppUiState) {
+        val notice = WorkNotificationPolicy.ongoing(state)
+        if (notice != null) {
+            lastKind = notice.kind
+            if (inForeground && notice != shownNotice) {
+                shownNotice = notice
+                runCatching {
+                    NotificationManagerCompat.from(this)
+                        .notify(WorkNotifications.ONGOING_ID, WorkNotifications.ongoing(this, notice))
+                }
+            }
+            return
+        }
+        val finished = WorkNotificationPolicy.finished(lastKind, state)
+        lastKind = null
+        if (finished != null && !voiceNotesApp.isInForeground) {
+            WorkNotifications.postFinished(this, finished)
+        }
+        leaveForeground()
+        // Keeps running if a newer start (new work) is already queued; its onStartCommand
+        // re-enters the foreground.
+        stopSelfResult(latestStartId)
+    }
+
+    private fun leaveForeground() {
+        if (!inForeground) return
+        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        inForeground = false
+        shownNotice = null
+    }
+
+    /** API 35 time limit for dataSync/mediaProcessing (6 h): cancel and stop promptly. */
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        Log.w(TAG, "Foreground service time limit reached; cancelling work")
+        appGraph.coordinator.cancel()
+        leaveForeground()
+        stopSelf()
+    }
+
+    override fun onDestroy() {
+        scope.cancel()
+        super.onDestroy()
+    }
+}
