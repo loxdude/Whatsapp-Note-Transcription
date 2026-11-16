@@ -1,8 +1,10 @@
 package com.local.voicenotes
 
 import android.content.Intent
+import android.content.Context
 import android.net.Uri
 import android.os.Bundle
+import android.provider.DocumentsContract
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -92,6 +94,18 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+/** The system picker falls back to its normal location if this folder is unavailable. */
+private class WhatsAppVoiceNotePicker : ActivityResultContracts.OpenDocument() {
+    override fun createIntent(context: Context, input: Array<String>): Intent =
+        super.createIntent(context, input).putExtra(
+            DocumentsContract.EXTRA_INITIAL_URI,
+            DocumentsContract.buildDocumentUri(
+                "com.android.externalstorage.documents",
+                "primary:Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Voice Notes"
+            )
+        )
+}
+
 @Composable
 private fun KeepScreenOn(enabled: Boolean) {
     val activity = LocalActivity.current
@@ -117,6 +131,9 @@ private fun AppTheme(content: @Composable () -> Unit) {
 @Composable
 private fun TranscriberScreen(state: AppUiState, viewModel: AppViewModel) {
     val audioPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let(viewModel::setAudio)
+    }
+    val whatsAppPicker = rememberLauncherForActivityResult(WhatsAppVoiceNotePicker()) { uri ->
         uri?.let(viewModel::setAudio)
     }
     val modelPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -154,11 +171,16 @@ private fun TranscriberScreen(state: AppUiState, viewModel: AppViewModel) {
                             enabled = !state.busy
                         ) { Text("Select audio") }
                     }
+                    TextButton(
+                        onClick = { whatsAppPicker.launch(arrayOf("audio/*", "application/octet-stream")) },
+                        enabled = !state.busy
+                    ) { Text("WhatsApp voice notes") }
                     Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
                         Text("TRANSCRIPTION", style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
                         val modelSummary = when (state.selectedModel?.backend) {
                             "mistral-api" -> "Cloud model: Mistral"
+                              "qwen-asr-cpu" -> "On-device model: Qwen3-ASR"
                             null -> "No model selected"
                             else -> "On-device model: Parakeet"
                         }
@@ -247,7 +269,7 @@ private fun TranscriberScreen(state: AppUiState, viewModel: AppViewModel) {
                     }
                 }
                 TextButton(onClick = { modelPicker.launch(arrayOf("application/octet-stream", "*/*")) },
-                    enabled = !state.busy) { Text("Import .tflite") }
+                    enabled = !state.busy) { Text("Import model") }
 
                 Text("Language", fontWeight = FontWeight.SemiBold)
                 var langExpanded by remember { mutableStateOf(false) }

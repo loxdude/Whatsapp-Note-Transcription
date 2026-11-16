@@ -74,21 +74,27 @@ class ModelRepository(private val context: Context) {
             ?: -1L
 
         require(sourceLength > 0) { "The selected model has no readable size." }
-        require(displayName.endsWith(".tflite", ignoreCase = true)) {
-            "Choose a .tflite model from the LiteRT Parakeet collection."
+        val lowerName = displayName.lowercase()
+        val isQwen = lowerName.endsWith(".litertlm") && "qwen3" in lowerName && "asr" in lowerName
+        val isQwen06 = isQwen && lowerName == "qwen3_asr_0.6b_5s_i8.litertlm"
+        val isQwen17 = isQwen && lowerName == "qwen3-asr-1.7b.litertlm"
+        require(lowerName.endsWith(".tflite") || isQwen06 || isQwen17) {
+            "Choose a stateful Parakeet .tflite model or Qwen3-ASR 0.6B/1.7B .litertlm package."
         }
         val header = resolver.openInputStream(uri)?.use { input ->
             ByteArray(8).also { require(input.read(it) == it.size) { "The model header is truncated." } }
         } ?: error("Cannot read the selected model.")
-        require(header.copyOfRange(4, 8).contentEquals("TFL3".encodeToByteArray())) {
-            "This is not a valid LiteRT/TFLite flatbuffer."
+        require(if (isQwen) header.contentEquals("LITERTLM".encodeToByteArray())
+            else header.copyOfRange(4, 8).contentEquals("TFL3".encodeToByteArray())) {
+            "The model header does not match its file format."
         }
 
-        val lowerName = displayName.lowercase()
         val isParakeet = "parakeet" in lowerName && ("tdt" in lowerName || "0.6b_v3" in lowerName)
         val isStateful = "stateful" in lowerName
-        val enabled = isParakeet && isStateful
+        val enabled = isQwen06 || isQwen17 || (isParakeet && isStateful)
         val note = when {
+            isQwen06 -> "Offline Qwen3-ASR 0.6B · CPU · independent 5-second chunks"
+            isQwen17 -> "Offline Qwen3-ASR 1.7B · CPU · independent 30-second chunks · about 4.2 GiB RAM"
             !isParakeet -> "Not recognized as a Parakeet TDT v3 export"
             !isStateful -> "Stateless 5 s export; select the stateful model for WhatsApp notes"
             else -> QualcommModels.note(displayName, Build.SOC_MODEL)
@@ -101,8 +107,8 @@ class ModelRepository(private val context: Context) {
             displayName = displayName,
             path = uri.toString(),
             sizeBytes = sourceLength,
-            architecture = "parakeet-tdt-0.6b-v3",
-            backend = QualcommModels.backend(displayName),
+            architecture = if (isQwen17) "qwen3-asr-1.7b" else if (isQwen06) "qwen3-asr-0.6b" else "parakeet-tdt-0.6b-v3",
+            backend = if (isQwen) "qwen-asr-cpu" else QualcommModels.backend(displayName),
             enabled = enabled,
             note = note
         )

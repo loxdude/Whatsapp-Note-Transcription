@@ -14,6 +14,7 @@ import com.local.voicenotes.domain.LanguageOption
 import com.local.voicenotes.domain.TranscriptionProgress
 import com.local.voicenotes.domain.TranscriptionResult
 import com.local.voicenotes.inference.LiteRtParakeetBackend
+import com.local.voicenotes.inference.QwenAsrBackend
 import com.local.voicenotes.inference.MistralTranscriptionBackend
 import com.local.voicenotes.inference.MistralApiKeyStore
 import com.local.voicenotes.inference.TranscriptionBackend
@@ -53,12 +54,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = ModelRepository(application)
     private val decoder = AndroidAudioDecoder(application.contentResolver)
     private val liteRtBackend = LiteRtParakeetBackend(application)
+    private val qwenBackend = QwenAsrBackend(application)
     private val mistralBackend = MistralTranscriptionBackend(application)
     private val mistralApiKeyStore = MistralApiKeyStore(application)
     private val mutableState = MutableStateFlow(AppUiState())
     private val backends: Map<String, TranscriptionBackend> = mapOf(
         "litert-qnn" to liteRtBackend,
         "litert-cpu" to liteRtBackend,
+        "qwen-asr-cpu" to qwenBackend,
         "litert-qnn-sm8650" to liteRtBackend,
         "mistral-api" to mistralBackend
     )
@@ -203,6 +206,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun cancel() {
+        qwenBackend.cancel()
         liteRtBackend.cancel()
         mistralBackend.cancel()
         activeJob?.cancel()
@@ -240,6 +244,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 return@launch
             }
+            backends.values.distinct().filter { it !== backend }.forEach { it.close() }
             backend.prepare(model).fold(
                 onSuccess = {
                     if (mutableState.value.selectedModelId == model.id) {
@@ -258,6 +263,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
+        qwenBackend.close()
         liteRtBackend.cancel()
         liteRtBackend.close()
         mistralBackend.cancel()
