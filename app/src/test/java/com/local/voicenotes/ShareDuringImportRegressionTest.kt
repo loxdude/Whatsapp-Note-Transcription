@@ -1,17 +1,13 @@
 package com.local.voicenotes
 
 import com.local.voicenotes.domain.TranscriptionProgress
-import com.local.voicenotes.share.SharedAudioDecision
-import com.local.voicenotes.share.decideSharedAudio
+import com.local.voicenotes.share.SharedAutoStart
+import com.local.voicenotes.share.SharedWorkController
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -22,25 +18,26 @@ import org.junit.Test
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.CoroutineContext
 
 /**
- * Review finding: audio shared while a model import runs waits for the first non-WAIT
- * decision. The import used to publish a transient Idle before its follow-up preparation
- * published LoadingModel; on a Main.immediate-like dispatcher the share started a
- * transcription on that Idle, which the preparation then superseded (empty transcript,
- * nothing saved, prepare and transcribe on the backend concurrently).
+ * Import must publish the model and LoadingModel atomically: an intermediate Idle could
+ * start a waiting share whose transcription the following preparation would then discard.
+ * Exercise the production shared start path, not an overspecified StateFlow event trace.
  */
 class ShareDuringImportRegressionTest {
     @Test fun shareWaitingOnImportIsTranscribedAfterThePreparationAndSaved() = runBlocking {
         val executor = Executors.newSingleThreadExecutor()
         val mainThread = executor.submit<Thread> { Thread.currentThread() }.get()
-        // Like Dispatchers.Main.immediate: resumes inline when already on the main thread.
         val immediate = object : CoroutineDispatcher() {
             override fun isDispatchNeeded(context: CoroutineContext) = Thread.currentThread() !== mainThread
             override fun dispatch(context: CoroutineContext, block: Runnable) = executor.execute(block)
         }
         val scope = CoroutineScope(SupervisorJob() + immediate)
+        val releaseImport = CompletableDeferred<Unit>()
+        val releasePrepare = CompletableDeferred<Unit>()
+        val releaseTranscribe = CompletableDeferred<Unit>()
         try {
             val completed = CopyOnWriteArrayList<CompletedTranscript>()
             val h = Harness(scope, onTranscriptCompleted = { completed += it })
@@ -48,54 +45,79 @@ class ShareDuringImportRegressionTest {
 
             val preparing = AtomicBoolean()
             val overlapped = AtomicBoolean()
+            val prepareEntered = CompletableDeferred<Unit>()
+            val transcribeEntered = CompletableDeferred<Unit>()
             h.local.onPrepare = {
                 preparing.set(true)
-                delay(50)
+                prepareEntered.complete(Unit)
+                releasePrepare.await()
                 preparing.set(false)
                 Result.success(Unit)
             }
             h.local.onTranscribe = { _, _ ->
                 if (preparing.get()) overlapped.set(true)
+                transcribeEntered.complete(Unit)
+                releaseTranscribe.await()
                 "local text"
             }
-            h.onDecode = { _, _ -> delay(20); FloatArray(16) }
-            val gate = CompletableDeferred<Unit>()
             val imported = model("c")
-            h.catalog.onImport = { _, _ -> gate.await(); h.catalog.stored += imported; imported }
-
-            withContext(immediate) {
+            h.catalog.onImport = { _, _ ->
+                releaseImport.await()
+                h.catalog.stored += imported
+                imported
+            }
+            val reservations = AtomicInteger()
+            val releases = AtomicInteger()
+            val handoffBusy = AtomicBoolean()
+            val work = SharedWorkController(
+                scope, h.coordinator,
+                loadAudioName = { _, _ -> "shared.ogg" },
+                awaitInitialRefresh = {},
+                cloudConsent = { false },
+                reserveService = {
+                    reservations.incrementAndGet()
+                    val release: () -> Unit = {
+                        handoffBusy.set(h.state.busy)
+                        reservations.decrementAndGet()
+                        releases.incrementAndGet()
+                    }
+                    release
+                },
+                startService = { error("share should use the already reserved foreground service") },
+                autoStart = { SharedAutoStart.START_IN_RUNNING_SERVICE }
+            )
+            val share = withContext(immediate) {
                 check(h.coordinator.importModel("content://m"))
-                h.coordinator.setAudio("content://shared", "shared.ogg")
+                // Main.immediate starts the state collector inline, before the import is released.
+                work.onSharedAudio("content://shared")
             }
-            val trace = CopyOnWriteArrayList<TranscriptionProgress>()
-            val watcher = scope.launch { h.coordinator.state.collect { trace += it.progress } }
-            val decision = CompletableDeferred<SharedAudioDecision>()
-            val started = CompletableDeferred<Boolean>()
-            // Mirrors AppViewModel.onSharedAudio.
-            scope.launch {
-                val first = h.coordinator.state.map { decideSharedAudio(it, "content://shared", false) }
-                    .first { it != SharedAudioDecision.WAIT }
-                decision.complete(first)
-                started.complete(first == SharedAudioDecision.TRANSCRIBE && h.coordinator.transcribe())
+            assertEquals(1, reservations.get())
+            releaseImport.complete(Unit)
+            withTimeout(5_000) { prepareEntered.await() }
+            assertEquals(0, h.local.transcribeCalls.get())
+            assertEquals(1, reservations.get())
+            releasePrepare.complete(Unit)
+            withTimeout(5_000) { transcribeEntered.await(); share.join() }
+            assertEquals(0, reservations.get())
+            assertEquals(1, releases.get())
+            assertTrue("service reservation carries over into running transcription", handoffBusy.get())
+            releaseTranscribe.complete(Unit)
+            val done = h.await {
+                it.progress is TranscriptionProgress.Completed || it.progress is TranscriptionProgress.Failed
             }
-            gate.complete(Unit)
-
-            assertEquals(SharedAudioDecision.TRANSCRIBE, withTimeout(5_000) { decision.await() })
-            assertTrue(withTimeout(5_000) { started.await() })
-            val done = h.await { it.progress is TranscriptionProgress.Completed || it.progress is TranscriptionProgress.Failed }
-            watcher.cancel()
-
+            // The completion callback follows the state write; drain the main dispatcher before reading it.
+            withContext(immediate) { Unit }
             assertTrue("prepared the imported model", "c" in h.local.prepared)
             assertEquals("local text", done.transcript)
             assertEquals(listOf("local text"), completed.map { it.text })
             assertEquals("c", completed.single().modelId)
+            assertEquals("content://shared", completed.single().audioUri)
             assertEquals(1, h.local.transcribeCalls.get())
             assertFalse("prepare and transcribe ran concurrently", overlapped.get())
-            // No Idle between the end of the import and the preparation.
-            val afterImport = trace.dropWhile { it !is TranscriptionProgress.Importing }
-                .dropWhile { it is TranscriptionProgress.Importing }
-            assertEquals(TranscriptionProgress.LoadingModel, afterImport.first())
         } finally {
+            releaseImport.complete(Unit)
+            releasePrepare.complete(Unit)
+            releaseTranscribe.complete(Unit)
             scope.cancel()
             executor.shutdownNow()
         }

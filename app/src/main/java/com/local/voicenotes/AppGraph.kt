@@ -14,6 +14,8 @@ import com.local.voicenotes.inference.MistralApiKeyStore
 import com.local.voicenotes.inference.MistralTranscriptionBackend
 import com.local.voicenotes.model.ModelRepository
 import com.local.voicenotes.model.ParakeetUltraModels
+import com.local.voicenotes.share.SharedWorkController
+import com.local.voicenotes.share.sharedAutoStart
 import com.local.voicenotes.work.TranscriptionService
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
@@ -26,6 +28,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -103,6 +106,33 @@ class AppGraph(private val app: VoiceNotesApplication) {
     /** The first model list load; shared-audio handling waits for it. */
     val initialRefresh: Job
 
+    private val consentPreferences = app.getSharedPreferences("privacy", 0)
+    private val mutableCloudConsent = MutableStateFlow(consentPreferences.getBoolean("cloud_upload_consent", false))
+    val cloudUploadConsent: StateFlow<Boolean> = mutableCloudConsent.asStateFlow()
+
+    private val sharedWork = SharedWorkController(
+        scope = scope,
+        coordinator = coordinator,
+        loadAudioName = { source, persist -> loadAudioName(Uri.parse(source), persist) },
+        awaitInitialRefresh = { initialRefresh.join() },
+        cloudConsent = { cloudUploadConsent.value },
+        reserveService = ::reserveWorkServiceForShare,
+        startService = { startWorkService() },
+        autoStart = { sharedAutoStart(app.isInForeground, workServiceInForeground) }
+    )
+    val consentPrompt = sharedWork.consentPrompt
+    val shareHint = sharedWork.shareHint
+
+    fun onSharedAudio(uri: Uri) = sharedWork.onSharedAudio(uri.toString())
+    fun transcribe(): Boolean = sharedWork.transcribe()
+    /** Single process-owned cancellation authority for UI and notification actions. */
+    fun cancelWork() = sharedWork.cancelWork()
+    fun consentPromptShown() = sharedWork.consentPromptShown()
+    fun grantCloudUploadConsent() {
+        consentPreferences.edit().putBoolean("cloud_upload_consent", true).apply()
+        mutableCloudConsent.value = true
+    }
+
     init {
         // Runs once per process, so a recreated activity cannot reset audio of running work.
         preferences.getString("uri", null)?.let { saved ->
@@ -139,7 +169,9 @@ class AppGraph(private val app: VoiceNotesApplication) {
      * which is acceptable because the audio is read when a transcription starts (local
      * decoding opens the file, Mistral copies it to a staging file first).
      */
-    fun setAudio(uri: Uri, persist: Boolean): Job = scope.launch(audioDispatcher) {
+    fun setAudio(uri: Uri, persist: Boolean): Job = sharedWork.setAudio(uri.toString(), persist)
+
+    private suspend fun loadAudioName(uri: Uri, persist: Boolean): String = withContext(audioDispatcher) {
         val resolver = app.contentResolver
         if (persist) {
             val previous = preferences.getString("uri", null)
@@ -169,7 +201,7 @@ class AppGraph(private val app: VoiceNotesApplication) {
                 if (cursor.moveToFirst()) cursor.getString(0) else null
             }
         }.getOrNull() ?: uri.lastPathSegment ?: "Selected audio"
-        coordinator.setAudio(uri.toString(), name)
+        name
     }
 
     /**

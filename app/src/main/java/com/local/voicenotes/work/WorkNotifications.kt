@@ -117,7 +117,7 @@ object WorkNotifications {
 /** Handles the notification's Cancel action; not exported, only our PendingIntent reaches it. */
 class CancelWorkReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        // The service observes the resulting Cancelled state and stops itself.
-        context.appGraph.coordinator.cancel()
+        // Also retire pending shares while the coordinator is still Idle.
+        context.appGraph.cancelWork()
     }
 }
