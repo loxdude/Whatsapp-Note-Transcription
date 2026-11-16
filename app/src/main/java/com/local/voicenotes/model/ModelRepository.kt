@@ -10,6 +10,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.local.voicenotes.domain.ImportedModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
@@ -55,6 +56,10 @@ class ModelRepository(private val context: Context) {
 
     suspend fun select(id: String) = context.modelDataStore.edit { it[selectedKey] = id }
 
+    /**
+     * Validates and stores the model. It does not change the selection: the caller decides
+     * whether the result still applies (the import may have been cancelled or superseded).
+     */
     suspend fun import(uri: Uri, onProgress: (Float) -> Unit): ImportedModel = withContext(Dispatchers.IO) {
         context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
         val resolver = context.contentResolver
@@ -107,8 +112,9 @@ class ModelRepository(private val context: Context) {
             note = note
         )
         val updated = (models().filterNot { it.id == hash } + model).sortedByDescending { it.enabled }
+        // Do not persist an import that was cancelled while it was being inspected.
+        coroutineContext.ensureActive()
         save(updated)
-        if (enabled) select(hash)
         onProgress(1f)
         model
     }

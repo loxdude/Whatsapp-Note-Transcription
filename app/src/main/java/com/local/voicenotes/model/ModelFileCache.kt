@@ -12,8 +12,8 @@ import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.locks.ReentrantLock
-import kotlin.concurrent.withLock
 
 /**
  * Content-addressed local copy of a model whose source can only be streamed
@@ -69,7 +69,8 @@ class ModelFileCache(
         }
     }
 
-    private val root = directory.absoluteFile
+    // Canonical so aliased paths to the same directory share one in-process lock.
+    private val root = runCatching { directory.canonicalFile }.getOrElse { directory.absoluteFile }
     private val blobs = File(root, "blobs")
     private val refs = File(root, "refs")
     private val tmp = File(root, "tmp")
@@ -81,10 +82,19 @@ class ModelFileCache(
      * abort; aborted or failed copies are removed and never published. Close the lease
      * once the file is no longer used.
      */
-    fun acquire(source: Source, checkCancelled: () -> Unit = {}): Lease {
+    fun acquire(
+        source: Source,
+        checkCancelled: () -> Unit = {},
+        /**
+         * Path of a blob the caller already has open and verified (e.g. backing a live
+         * session). A cache hit on any *other* blob is re-hashed before it is returned, so
+         * same-length corruption of a private copy is replaced instead of loaded.
+         */
+        trustedBlobPath: String? = null
+    ): Lease {
         require(source.expectedSize > 0) { "The model has no recorded size." }
-        return withDirectoryLock {
-            val blob = resolveLocked(source, checkCancelled)
+        return withDirectoryLock(checkCancelled) {
+            val blob = resolveLocked(source, checkCancelled, trustedBlobPath)
             synchronized(leases) { leases[blob.path] = (leases[blob.path] ?: 0) + 1 }
             val lease = Lease(blob)
             // Also on hits, so blobs whose last lease was released since get reclaimed.
@@ -93,7 +103,7 @@ class ModelFileCache(
         }
     }
 
-    private fun resolveLocked(source: Source, checkCancelled: () -> Unit): File {
+    private fun resolveLocked(source: Source, checkCancelled: () -> Unit, trustedBlobPath: String?): File {
         purgeIncompleteAndLegacy()
         val refFile = File(refs, sha256Hex(source.key.encodeToByteArray()))
         val previous = readRef(refFile)
@@ -101,11 +111,12 @@ class ModelFileCache(
         if (previous != null && isCompleteBlob(blobFor(previous), source.expectedSize)) {
             // Verify instead of trusting URI/size: hash only, no writes on a hit.
             val digest = source.open().use { hashStream(it, source.expectedSize, null, checkCancelled) }
-            if (digest == previous) return blobFor(previous)
             sourceDigest = digest
             val known = blobFor(digest)
-            if (isCompleteBlob(known, source.expectedSize)) {
-                writeRef(refFile, digest)
+            if (isCompleteBlob(known, source.expectedSize) &&
+                blobIntact(known, digest, source.expectedSize, checkCancelled, trustedBlobPath)
+            ) {
+                if (digest != previous) writeRef(refFile, digest)
                 return known
             }
         }
@@ -138,14 +149,13 @@ class ModelFileCache(
             if (expectedDigest != null && digest != expectedDigest) {
                 throw SourceChangedException("The model file changed while it was being verified. Try again.")
             }
+            // Always publish the freshly hashed bytes, replacing any blob of that name: an
+            // existing one reached this point only because it was missing, short or failed
+            // its integrity check. Open handles keep the replaced inode alive.
             val blob = blobFor(digest)
-            if (isCompleteBlob(blob, source.expectedSize)) {
-                partial.delete()
-            } else {
-                blobs.mkdirs()
-                moveAtomically(partial, blob)
-                syncDirectory(blobs)
-            }
+            blobs.mkdirs()
+            moveAtomically(partial, blob)
+            syncDirectory(blobs)
             return blob
         } catch (error: Throwable) {
             partial.delete()
@@ -187,6 +197,30 @@ class ModelFileCache(
     }
 
     private fun isCompleteBlob(blob: File, size: Long) = blob.isFile && blob.length() == size
+
+    /**
+     * Re-hashes a cached blob unless it is the caller's [trustedBlobPath]. A blob whose bytes
+     * no longer match its digest name is deleted (unless leased) so the caller re-copies it.
+     */
+    private fun blobIntact(
+        blob: File,
+        digest: String,
+        size: Long,
+        checkCancelled: () -> Unit,
+        trustedBlobPath: String?
+    ): Boolean {
+        if (trustedBlobPath != null && File(trustedBlobPath).absoluteFile == blob.absoluteFile) return true
+        val actual = try {
+            blob.inputStream().use { hashStream(it, size, null, checkCancelled) }
+        } catch (_: SourceChangedException) {
+            null
+        }
+        if (actual == digest) return true
+        val leased = synchronized(leases) { blob.path in leases }
+        if (!leased) blob.delete()
+        corruptBlobsDetected++
+        return false
+    }
 
     private fun blobFor(digest: String) = File(blobs, digest + BLOB_SUFFIX)
 
@@ -235,13 +269,28 @@ class ModelFileCache(
         }
     }
 
-    private fun <T> withDirectoryLock(block: () -> T): T {
+    /**
+     * Serializes resolutions in-process and across processes. Waiting for either lock
+     * polls [checkCancelled], so a cancelled preparation does not block behind another
+     * copy of a large model.
+     */
+    private fun <T> withDirectoryLock(checkCancelled: () -> Unit, block: () -> T): T {
         root.mkdirs()
         if (!root.isDirectory) throw IOException("Cannot create the model cache directory.")
-        return inProcessLocks.computeIfAbsent(root.path) { ReentrantLock() }.withLock {
-            RandomAccessFile(lockFile, "rw").use { file ->
-                file.channel.lock().use { block() }
+        val lock = inProcessLocks.computeIfAbsent(root.path) { ReentrantLock() }
+        while (!lock.tryLock(LOCK_POLL_MILLIS, TimeUnit.MILLISECONDS)) checkCancelled()
+        try {
+            return RandomAccessFile(lockFile, "rw").use { file ->
+                var fileLock = file.channel.tryLock()
+                while (fileLock == null) {
+                    checkCancelled()
+                    Thread.sleep(LOCK_POLL_MILLIS)
+                    fileLock = file.channel.tryLock()
+                }
+                fileLock.use { block() }
             }
+        } finally {
+            lock.unlock()
         }
     }
 
@@ -261,6 +310,10 @@ class ModelFileCache(
 
     companion object {
         const val DEFAULT_BUFFER_SIZE = 8 * 1024 * 1024
+        private const val LOCK_POLL_MILLIS = 50L
+        /** Diagnostics/test counter: cached blobs whose bytes no longer matched their digest. */
+        @Volatile var corruptBlobsDetected = 0
+            internal set
         private const val BLOB_SUFFIX = ".tflite"
         private val DIGEST = Regex("[0-9a-f]{64}")
         private val BLOB_NAME = Regex("[0-9a-f]{64}\\.tflite")

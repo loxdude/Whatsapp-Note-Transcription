@@ -8,6 +8,7 @@ import android.os.SystemClock
 import android.provider.DocumentsContract
 import android.util.Log
 import com.local.voicenotes.audio.ParakeetFeatureExtractor
+import com.local.voicenotes.concurrent.runCatchingCancellable
 import com.local.voicenotes.domain.ImportedModel
 import com.local.voicenotes.domain.LanguageOption
 import com.google.ai.edge.litert.CompiledModel
@@ -17,6 +18,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.job
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.asCoroutineDispatcher
 import java.util.concurrent.Executors
@@ -53,18 +55,21 @@ class LiteRtParakeetBackend internal constructor(
         private val inferenceDispatcher = inferenceExecutor.asCoroutineDispatcher()
     }
 
-    @Volatile private var cancelled = false
+    /** Job of the transcription currently running on the NPU thread; cancelled by [cancel]. */
+    @Volatile private var activeCall: Job? = null
     @Volatile private var activeSession: Session? = null
     @Volatile private var preparedModelId: String? = null
     @Volatile private var preparedSession: Session? = null
     @Volatile private var preparedModelPath: String? = null
+    /** Source change marker observed when [preparedSession] was verified; null = unknown. */
+    @Volatile private var preparedStamp: String? = null
     private val sessionLock = Any()
     private val assets by lazy { ParakeetAssets.load(context) }
     private val frontend by lazy { ParakeetFeatureExtractor(assets) }
     private val modelCache by lazy { ModelFileCache(File(context.noBackupFilesDir, "litert-models")) }
 
     override suspend fun validate(model: ImportedModel): Result<Unit> = withContext(Dispatchers.IO) {
-        runCatching {
+        runCatchingCancellable {
             require(model.architecture == "parakeet-tdt-0.6b-v3") {
                 "Select the stateful Parakeet TDT 0.6B v3 LiteRT model."
             }
@@ -79,12 +84,12 @@ class LiteRtParakeetBackend internal constructor(
 
     override suspend fun prepare(model: ImportedModel): Result<Unit> =
         withContext(inferenceDispatcher) {
-            runCatching {
+            runCatchingCancellable {
                 validate(model).getOrThrow()
                 // Preparation (selection, import, app start) re-verifies the source
                 // content, so an edited model is never served from a stale session.
-                val job = coroutineContext[Job]
-                sessionFor(model, verifySource = true) { job?.ensureActive() }
+                val job = coroutineContext.job
+                sessionFor(model, verifySource = true) { job.ensureActive() }
                 Unit
             }
         }
@@ -98,111 +103,116 @@ class LiteRtParakeetBackend internal constructor(
         // Parakeet v3 identifies the language acoustically; the parameter is
         // retained for parity with the baseline UI and benchmark harness.
         @Suppress("UNUSED_VARIABLE") val selectedLanguage = language
-        cancelled = false
-        val totalStarted = SystemClock.elapsedRealtimeNanos()
-        val job = coroutineContext[Job]
-        val session = sessionFor(model, verifySource = false) {
-            job?.ensureActive()
-            if (cancelled) throw CancellationException("Transcription cancelled.")
-        }
-        Log.i(TAG, "reusePreparedSession=true accelerator=${session.target.label} audioSamples=${pcm16KhzMono.size}")
-        activeSession = session
+        // Cancellation is per call: a cancel() aimed at an earlier run can never leak into this
+        // one, and the job is cancelled with the caller's coroutine as well.
+        val callJob = coroutineContext.job
+        activeCall = callJob
         try {
-            val emitted = ArrayList<Int>()
-            var predictor: Predictor? = null
-            var frontendNanos = 0L
-            var encoderNanos = 0L
-            var decoderNanos = 0L
-            var decoderCalls = 0
-            val chunkCount = (pcm16KhzMono.size + ParakeetFeatureExtractor.CHUNK_SAMPLES - 1) /
-                ParakeetFeatureExtractor.CHUNK_SAMPLES
-            repeat(chunkCount) { chunk ->
-                checkActive()
-                val frontendStarted = SystemClock.elapsedRealtimeNanos()
-                val features = frontend.extract(
-                    pcm16KhzMono,
-                    chunk * ParakeetFeatureExtractor.CHUNK_SAMPLES
-                )
-                frontendNanos += SystemClock.elapsedRealtimeNanos() - frontendStarted
-                checkActive()
-                val encoderStarted = SystemClock.elapsedRealtimeNanos()
-                val encoder = session.encode(features)
-                encoderNanos += SystemClock.elapsedRealtimeNanos() - encoderStarted
-                val initialDecoderStarted = SystemClock.elapsedRealtimeNanos()
-                predictor = session.bindEncoder(encoder, predictor)
-                decoderNanos += SystemClock.elapsedRealtimeNanos() - initialDecoderStarted
-                decoderCalls++
-                var frame = 0
-                var inner = 0
-                while (frame < ENCODER_FRAMES) {
+            val totalStarted = SystemClock.elapsedRealtimeNanos()
+            // A cheap provider stamp decides whether the prepared session may be reused
+            // as-is; a changed or unavailable stamp forces a full content re-verification.
+            val verify = sourceMayHaveChanged(model)
+            val session = sessionFor(model, verifySource = verify) { callJob.ensureActive() }
+            Log.i(TAG, "reusePreparedSession=${!verify} accelerator=${session.target.label} audioSamples=${pcm16KhzMono.size}")
+            activeSession = session
+            try {
+                val emitted = ArrayList<Int>()
+                var predictor: Predictor? = null
+                var frontendNanos = 0L
+                var encoderNanos = 0L
+                var decoderNanos = 0L
+                var decoderCalls = 0
+                val chunkCount = (pcm16KhzMono.size + ParakeetFeatureExtractor.CHUNK_SAMPLES - 1) /
+                    ParakeetFeatureExtractor.CHUNK_SAMPLES
+                repeat(chunkCount) { chunk ->
                     checkActive()
-                    val logits = predictor!!.logits
-                    val row = frame * LOGITS
-                    var token = 0
-                    var tokenValue = logits[row]
-                    for (id in 1 until VOCAB_WITH_BLANK) {
-                        val value = logits[row + id]
-                        if (value > tokenValue) {
-                            tokenValue = value
-                            token = id
-                        }
-                    }
-                    var duration = 0
-                    var durationValue = logits[row + VOCAB_WITH_BLANK]
-                    for (id in 1 until 5) {
-                        val value = logits[row + VOCAB_WITH_BLANK + id]
-                        if (value > durationValue) {
-                            durationValue = value
-                            duration = id
-                        }
-                    }
-                    if (token == BLANK) {
-                        if (duration > 0) {
-                            frame += duration
-                            inner = 0
-                        } else {
-                            inner++
-                            if (inner >= MAX_SYMBOLS_PER_FRAME) {
-                                frame++
-                                inner = 0
+                    val frontendStarted = SystemClock.elapsedRealtimeNanos()
+                    val features = frontend.extract(
+                        pcm16KhzMono,
+                        chunk * ParakeetFeatureExtractor.CHUNK_SAMPLES
+                    )
+                    frontendNanos += SystemClock.elapsedRealtimeNanos() - frontendStarted
+                    checkActive()
+                    val encoderStarted = SystemClock.elapsedRealtimeNanos()
+                    val encoder = session.encode(features)
+                    encoderNanos += SystemClock.elapsedRealtimeNanos() - encoderStarted
+                    val initialDecoderStarted = SystemClock.elapsedRealtimeNanos()
+                    predictor = session.bindEncoder(encoder, predictor)
+                    decoderNanos += SystemClock.elapsedRealtimeNanos() - initialDecoderStarted
+                    decoderCalls++
+                    var frame = 0
+                    var inner = 0
+                    while (frame < ENCODER_FRAMES) {
+                        checkActive()
+                        val logits = predictor!!.logits
+                        val row = frame * LOGITS
+                        var token = 0
+                        var tokenValue = logits[row]
+                        for (id in 1 until VOCAB_WITH_BLANK) {
+                            val value = logits[row + id]
+                            if (value > tokenValue) {
+                                tokenValue = value
+                                token = id
                             }
                         }
-                    } else {
-                        emitted += token
-                        val decoderStarted = SystemClock.elapsedRealtimeNanos()
-                        predictor = session.advance(encoder, token, predictor!!)
-                        decoderNanos += SystemClock.elapsedRealtimeNanos() - decoderStarted
-                        decoderCalls++
-                        if (duration > 0) {
-                            frame += duration
-                            inner = 0
-                        } else {
-                            inner++
-                            if (inner >= MAX_SYMBOLS_PER_FRAME) {
-                                frame++
+                        var duration = 0
+                        var durationValue = logits[row + VOCAB_WITH_BLANK]
+                        for (id in 1 until 5) {
+                            val value = logits[row + VOCAB_WITH_BLANK + id]
+                            if (value > durationValue) {
+                                durationValue = value
+                                duration = id
+                            }
+                        }
+                        if (token == BLANK) {
+                            if (duration > 0) {
+                                frame += duration
                                 inner = 0
+                            } else {
+                                inner++
+                                if (inner >= MAX_SYMBOLS_PER_FRAME) {
+                                    frame++
+                                    inner = 0
+                                }
+                            }
+                        } else {
+                            emitted += token
+                            val decoderStarted = SystemClock.elapsedRealtimeNanos()
+                            predictor = session.advance(encoder, token, predictor!!)
+                            decoderNanos += SystemClock.elapsedRealtimeNanos() - decoderStarted
+                            decoderCalls++
+                            if (duration > 0) {
+                                frame += duration
+                                inner = 0
+                            } else {
+                                inner++
+                                if (inner >= MAX_SYMBOLS_PER_FRAME) {
+                                    frame++
+                                    inner = 0
+                                }
                             }
                         }
                     }
+                    onProgress((chunk + 1f) / chunkCount)
                 }
-                onProgress((chunk + 1f) / chunkCount)
-            }
-            detokenize(emitted).also {
-                Log.i(
-                    TAG,
-                    "chunks=$chunkCount frontend=${frontendNanos / 1_000_000}ms " +
-                        "encode=${encoderNanos / 1_000_000}ms decode=${decoderNanos / 1_000_000}ms " +
-                        "decodeCalls=$decoderCalls tokens=${emitted.size} total=${elapsedMillis(totalStarted)}ms"
-                )
+                detokenize(emitted).also {
+                    Log.i(
+                        TAG,
+                        "chunks=$chunkCount frontend=${frontendNanos / 1_000_000}ms " +
+                            "encode=${encoderNanos / 1_000_000}ms decode=${decoderNanos / 1_000_000}ms " +
+                            "decodeCalls=$decoderCalls tokens=${emitted.size} total=${elapsedMillis(totalStarted)}ms"
+                    )
+                }
+            } finally {
+                activeSession = null
             }
         } finally {
-            activeSession = null
+            if (activeCall === callJob) activeCall = null
         }
     }
 
     private suspend fun checkActive() {
         coroutineContext.ensureActive()
-        if (cancelled) throw CancellationException("Transcription cancelled.")
     }
 
     private fun elapsedMillis(startedNanos: Long): Long =
@@ -212,6 +222,8 @@ class LiteRtParakeetBackend internal constructor(
      * Returns the session for [model]. Without [verifySource] an existing session for the
      * same model id is reused as-is (per-transcription fast path). With it, the source is
      * re-hashed and the session is only kept if it was built from the identical bytes.
+     * A cached blob that would back a *new* session is re-hashed as well, so same-length
+     * corruption of the private copy is detected instead of loaded.
      */
     private fun sessionFor(
         model: ImportedModel,
@@ -221,8 +233,10 @@ class LiteRtParakeetBackend internal constructor(
         val existing = preparedSession
         if (existing != null && preparedModelId == model.id && !verifySource) return@synchronized existing
         val modelFileStarted = SystemClock.elapsedRealtimeNanos()
+        val stampBefore = sourceStamp(model)
+        val trustedPath = if (existing != null && preparedModelId == model.id) preparedModelPath else null
         val modelFile = try {
-            openModelFile(model, checkCancelled)
+            openModelFile(model, checkCancelled, trustedPath)
         } catch (error: Throwable) {
             // Failed or cancelled verification must not leave a possibly stale session
             // behind for the next transcription to reuse unchecked.
@@ -230,26 +244,33 @@ class LiteRtParakeetBackend internal constructor(
             preparedSession = null
             preparedModelId = null
             preparedModelPath = null
+            preparedStamp = null
             throw error
         }
         val modelFileMillis = elapsedMillis(modelFileStarted)
         if (existing != null && preparedModelId == model.id && preparedModelPath == modelFile.path) {
             Log.i(TAG, "verified modelFile=${modelFileMillis}ms; reusing session model=${model.displayName}")
             modelFile.close() // the existing session keeps its own lease on the same blob
+            preparedStamp = stampBefore
             return@synchronized existing
         }
         existing?.close()
         preparedSession = null
         preparedModelId = null
         preparedModelPath = null
+        preparedStamp = null
         val sessionStarted = SystemClock.elapsedRealtimeNanos()
         // Decided by the model's backend only. NPU failures are reported as NPU
         // failures; there is deliberately no automatic CPU fallback.
         val target = ExecutionTarget.forBackend(model.backend)
         val created = try {
             Session(environments, modelFile, target)
-        } catch (error: Exception) {
+        } catch (error: Throwable) {
             modelFile.close()
+            // LinkageError (e.g. UnsatisfiedLinkError from CompiledModel.create) also gets
+            // accelerator-specific diagnostics; fatal VM errors and cancellation propagate.
+            if (error is VirtualMachineError || error is CancellationException ||
+                (error !is Exception && error !is LinkageError)) throw error
             Log.e(TAG, "${target.label} preparation failed: soc=${Build.SOC_MODEL} model=${model.displayName}", error)
             throw IllegalStateException(
                 PreparationDiagnostics.message(
@@ -261,6 +282,7 @@ class LiteRtParakeetBackend internal constructor(
         val sessionMillis = elapsedMillis(sessionStarted)
         preparedModelId = model.id
         preparedModelPath = modelFile.path
+        preparedStamp = stampBefore
         preparedSession = created
         Log.i(TAG, "prepared accelerator=${target.label} modelFile=${modelFileMillis}ms session=${sessionMillis}ms model=${model.displayName}")
         created
@@ -291,11 +313,15 @@ class LiteRtParakeetBackend internal constructor(
     }
 
     override fun cancel() {
-        cancelled = true
+        activeCall?.cancel(CancellationException("Transcription cancelled."))
     }
 
+    /**
+     * Releases the session on the NPU thread, after any inference already running there has
+     * stopped. Work queued later (for example a subsequent prepare) creates a new session.
+     */
     override fun close() {
-        cancelled = true
+        cancel()
         inferenceExecutor.execute { closeSession() }
     }
 
@@ -308,7 +334,25 @@ class LiteRtParakeetBackend internal constructor(
             preparedSession = null
             preparedModelId = null
             preparedModelPath = null
+            preparedStamp = null
         }
+    }
+
+    /** Cheap change marker of the model source: provider size + last-modified, or file stat. */
+    private fun sourceStamp(model: ImportedModel): String? {
+        val uri = Uri.parse(model.path)
+        return if (uri.scheme == "content") {
+            SafModelSource(model, uri).stamp()
+        } else {
+            File(model.path).takeIf { it.isFile }?.let { "${it.length()}:${it.lastModified()}" }
+        }
+    }
+
+    /** True when the prepared session cannot be trusted without re-hashing the source. */
+    private fun sourceMayHaveChanged(model: ImportedModel): Boolean {
+        if (preparedModelId != model.id) return true
+        val prepared = preparedStamp ?: return true
+        return sourceStamp(model) != prepared
     }
 
     private fun openModel(model: ImportedModel): MappedByteBuffer {
@@ -331,13 +375,17 @@ class LiteRtParakeetBackend internal constructor(
         }
     }
 
-    private fun openModelFile(model: ImportedModel, checkCancelled: () -> Unit): ModelFile {
+    private fun openModelFile(
+        model: ImportedModel,
+        checkCancelled: () -> Unit,
+        trustedBlobPath: String?
+    ): ModelFile {
         val uri = Uri.parse(model.path)
         return if (uri.scheme == "content") {
             // CompiledModel's native loader requires a regular filesystem
             // path; unlike Interpreter it cannot consume a SAF descriptor.
             // The cache is content-addressed: the source is hashed on every call.
-            val lease = modelCache.acquire(SafModelSource(model, uri), checkCancelled)
+            val lease = modelCache.acquire(SafModelSource(model, uri), checkCancelled, trustedBlobPath)
             ModelFile(lease.file.absolutePath, null, lease)
         } else {
             ModelFile(File(model.path).absolutePath, null, null)

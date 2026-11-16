@@ -4,10 +4,13 @@ import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.util.Log
+import com.local.voicenotes.concurrent.copyCancellable
+import com.local.voicenotes.concurrent.runCatchingCancellable
 import com.local.voicenotes.domain.ImportedModel
 import com.local.voicenotes.domain.LanguageOption
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.job
 import kotlinx.coroutines.withContext
 import okhttp3.Call
 import okhttp3.MediaType.Companion.toMediaType
@@ -18,6 +21,7 @@ import okhttp3.RequestBody.Companion.asRequestBody
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import java.net.URLConnection
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.cancellation.CancellationException
@@ -43,7 +47,7 @@ class MistralTranscriptionBackend(private val context: Context) : UriTranscripti
     private var activeCall: Call? = null
 
     override suspend fun validate(model: ImportedModel): Result<Unit> = withContext(Dispatchers.IO) {
-        runCatching {
+        runCatchingCancellable {
             require(model.backend == "mistral-api") { "This is not a Mistral API model." }
             require(model.architecture == "voxtral-mini-latest") {
                 "Mistral API only supports voxtral-mini-latest model."
@@ -78,11 +82,11 @@ class MistralTranscriptionBackend(private val context: Context) : UriTranscripti
 
     override suspend fun transcribeUri(
         model: ImportedModel,
-        uri: Uri,
+        uri: String,
         language: LanguageOption,
         onProgress: (Float) -> Unit
     ): String = withContext(Dispatchers.IO) {
-        val source = stageSourceFile(uri)
+        val source = stageSourceFile(Uri.parse(uri), coroutineContext.job::ensureActive)
         try {
             transcribeFile(model, source.file, source.fileName, source.mimeType, language, onProgress)
         } finally {
@@ -90,6 +94,7 @@ class MistralTranscriptionBackend(private val context: Context) : UriTranscripti
         }
     }
 
+    /** Aborts the in-flight request. Cancelling the calling coroutine has the same effect. */
     override fun cancel() {
         activeCall?.cancel()
     }
@@ -129,36 +134,43 @@ class MistralTranscriptionBackend(private val context: Context) : UriTranscripti
         // Mistral exposes no upload or server-side transcription progress. Report an
         // indeterminate state instead of leaving the UI falsely stuck at a fixed value.
         onProgress(0f)
+        coroutineContext.ensureActive()
         val call = client.newCall(request)
         activeCall = call
         try {
-            call.execute().use { response ->
-                coroutineContext.ensureActive()
-                if (!response.isSuccessful) {
-                    Log.w(TAG, "Mistral API request failed with HTTP ${response.code}")
-                    throw IllegalStateException(apiErrorMessage(response.code))
-                }
-                val responseBody = response.body?.string()
-                    ?: throw IllegalStateException("Empty response from Mistral API")
-                val result = parseMistralResponse(responseBody)
-                onProgress(1f)
-                return result
+            // awaitResult() cancels the call as soon as this coroutine is cancelled, so a
+            // cancellation that races with request setup cannot leave the upload running.
+            val response = call.awaitResult()
+            coroutineContext.ensureActive()
+            if (!response.isSuccessful) {
+                Log.w(TAG, "Mistral API request failed with HTTP ${response.code}")
+                throw IllegalStateException(apiErrorMessage(response.code))
             }
-        } catch (e: java.net.SocketTimeoutException) {
-            throw IllegalStateException("Network timeout while contacting Mistral API.", e)
-        } catch (e: java.net.UnknownHostException) {
-            throw IllegalStateException("Unable to reach Mistral API. Check your internet connection.", e)
-        } catch (e: java.net.ConnectException) {
-            throw IllegalStateException("Unable to connect to Mistral API. Check your internet connection.", e)
-        } catch (e: java.io.IOException) {
-            if (call.isCanceled()) throw CancellationException("Transcription cancelled")
-            throw IllegalStateException("Network error while contacting Mistral API.", e)
+            val responseBody = response.body
+                ?: throw IllegalStateException("Empty response from Mistral API")
+            val result = parseMistralResponse(responseBody)
+            onProgress(1f)
+            return result
+        } catch (e: IOException) {
+            // cancel() aborts the call with an IOException; report it as cancellation.
+            if (call.isCanceled()) {
+                throw CancellationException("Transcription cancelled").apply { initCause(e) }
+            }
+            throw when (e) {
+                is java.net.SocketTimeoutException ->
+                    IllegalStateException("Network timeout while contacting Mistral API.", e)
+                is java.net.UnknownHostException ->
+                    IllegalStateException("Unable to reach Mistral API. Check your internet connection.", e)
+                is java.net.ConnectException ->
+                    IllegalStateException("Unable to connect to Mistral API. Check your internet connection.", e)
+                else -> IllegalStateException("Network error while contacting Mistral API.", e)
+            }
         } finally {
             if (activeCall === call) activeCall = null
         }
     }
 
-    private fun stageSourceFile(uri: Uri): UploadSource {
+    private fun stageSourceFile(uri: Uri, ensureActive: () -> Unit): UploadSource {
         if (uri.scheme == "file") {
             val file = uri.path?.let(::File)
             if (file?.isFile == true) return UploadSource(file, file.name, mimeTypeFor(file.name), false)
@@ -172,7 +184,7 @@ class MistralTranscriptionBackend(private val context: Context) : UriTranscripti
         val tempFile = File.createTempFile("mistral-", fileName.safeSuffix(), context.cacheDir)
         try {
             resolver.openInputStream(uri)?.use { input ->
-                FileOutputStream(tempFile).use(input::copyTo)
+                FileOutputStream(tempFile).use { output -> copyCancellable(input, output, ensureActive = ensureActive) }
             } ?: throw IllegalStateException("Failed to open the selected audio file.")
             return UploadSource(tempFile, fileName, resolver.getType(uri) ?: mimeTypeFor(fileName), true)
         } catch (error: Throwable) {
