@@ -123,6 +123,9 @@ private fun TranscriberScreen(state: AppUiState, viewModel: AppViewModel) {
         uri?.let(viewModel::importModel)
     }
     var showApiKeyDialog by rememberSaveable { mutableStateOf(false) }
+    var showCloudConsent by rememberSaveable { mutableStateOf(false) }
+    val cloudConsent by viewModel.cloudUploadConsent.collectAsStateWithLifecycle()
+    val cloudSelected = state.selectedModel?.backend == "mistral-api"
     var showSettings by rememberSaveable { mutableStateOf(false) }
     val clipboard = LocalClipboardManager.current
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
@@ -163,7 +166,8 @@ private fun TranscriberScreen(state: AppUiState, viewModel: AppViewModel) {
                             else -> "On-device model: Parakeet"
                         }
                         Text(modelSummary, style = MaterialTheme.typography.labelMedium)
-                        Text("Language: ${state.language.label}",
+                        Text(if (cloudSelected) "Language: ${state.language.label}"
+                            else "Language: detected automatically",
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
@@ -171,7 +175,10 @@ private fun TranscriberScreen(state: AppUiState, viewModel: AppViewModel) {
                         ProgressArea(state)
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = viewModel::transcribe, enabled = state.canTranscribe,
+                        Button(onClick = {
+                                if (cloudSelected && !cloudConsent) showCloudConsent = true
+                                else viewModel.transcribe()
+                            }, enabled = state.canTranscribe,
                             modifier = Modifier.weight(1f).height(48.dp)) {
                             Text(if (state.busy) "Working..." else if (state.transcript.isNotBlank()) "Transcribe again" else "Transcribe")
                         }
@@ -250,8 +257,15 @@ private fun TranscriberScreen(state: AppUiState, viewModel: AppViewModel) {
                     enabled = !state.busy) { Text("Import .tflite") }
 
                 Text("Language", fontWeight = FontWeight.SemiBold)
+                if (!cloudSelected) {
+                    // Parakeet identifies the language acoustically and ignores this setting.
+                    Text("The on-device model detects the language automatically. " +
+                        "This setting only applies to the Mistral cloud model.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
                 var langExpanded by remember { mutableStateOf(false) }
-                ExposedDropdownMenuBox(langExpanded, { langExpanded = !langExpanded && !state.busy }) {
+                ExposedDropdownMenuBox(langExpanded, { langExpanded = !langExpanded && !state.busy && cloudSelected }) {
                     OutlinedTextField(
                         value = state.language.label, onValueChange = {}, readOnly = true,
                         trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(langExpanded) },
@@ -274,6 +288,28 @@ private fun TranscriberScreen(state: AppUiState, viewModel: AppViewModel) {
                 }
             }
         }
+    }
+
+    if (showCloudConsent) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showCloudConsent = false },
+            title = { Text("Upload audio to Mistral?") },
+            text = {
+                Text("The selected model runs in the cloud. Your audio file will be uploaded to " +
+                    "Mistral AI for transcription. On-device models never upload audio. " +
+                    "You can switch models in settings at any time.")
+            },
+            confirmButton = {
+                Button(onClick = {
+                    showCloudConsent = false
+                    viewModel.grantCloudUploadConsent()
+                    viewModel.transcribe()
+                }) { Text("Upload and transcribe") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCloudConsent = false }) { Text("Cancel") }
+            }
+        )
     }
 
     if (showApiKeyDialog) {
