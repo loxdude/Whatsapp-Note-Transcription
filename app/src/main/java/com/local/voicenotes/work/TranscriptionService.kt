@@ -72,14 +72,24 @@ class TranscriptionService : Service() {
         // already finished; the observer below stops the service again right away then.
         val notice = WorkNotificationPolicy.ongoing(state)
             ?: OngoingNotice(WorkKind.TRANSCRIPTION, "Voice notes", "Working", null)
-        try {
-            ServiceCompat.startForeground(
-                this, WorkNotifications.ONGOING_ID, WorkNotifications.ongoing(this, notice), foregroundType
-            )
-            inForeground = true
-            shownNotice = notice
-        } catch (refused: RuntimeException) {
-            Log.w(TAG, "startForeground refused", refused)
+        val notification = WorkNotifications.ongoing(this, notice)
+        // Some OEM builds (seen on OxygenOS 16) reject mediaProcessing as "type none" even though
+        // it is declared and its permission is granted; dataSync is the declared fallback.
+        var lastRefusal: RuntimeException? = null
+        for (type in listOf(foregroundType, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC).distinct()) {
+            try {
+                ServiceCompat.startForeground(this, WorkNotifications.ONGOING_ID, notification, type)
+                inForeground = true
+                shownNotice = notice
+                lastRefusal = null
+                Log.i(TAG, "foreground service started type=$type")
+                break
+            } catch (refused: RuntimeException) {
+                Log.w(TAG, "startForeground refused for type=$type", refused)
+                lastRefusal = refused
+            }
+        }
+        if (lastRefusal != null) {
             stopSelf(startId)
             return START_NOT_STICKY
         }

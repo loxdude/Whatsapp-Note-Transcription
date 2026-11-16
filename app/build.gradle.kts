@@ -14,8 +14,8 @@ android {
         applicationId = "com.local.voicenotes.litert"
         minSdk = 31
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.3.0-litert"
+        versionCode = 6
+        versionName = "0.5.0-litert"
         ndk { abiFilters += "arm64-v8a" }
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
