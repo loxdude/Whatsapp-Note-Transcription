@@ -153,6 +153,15 @@ fun MainScreen(
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
+    val protectionLost by viewModel.backgroundProtectionLost.collectAsStateWithLifecycle()
+    LaunchedEffect(protectionLost) {
+        if (protectionLost) {
+            // Screen scope: resetting the flag restarts this effect, which must not dismiss the hint.
+            scope.launch { snackbar.showSnackbar("Keep the app open until the transcription finishes.") }
+            viewModel.backgroundProtectionHintShown()
+        }
+    }
+
     LaunchedEffect(consentPrompt) {
         // Shared audio for a cloud model waits for the same consent dialog as a tap.
         if (consentPrompt) {

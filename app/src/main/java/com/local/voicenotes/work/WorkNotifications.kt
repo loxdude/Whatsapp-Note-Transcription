@@ -78,6 +78,16 @@ object WorkNotifications {
             .addAction(0, "Cancel", cancel)
     }
 
+    /** Replaces the ongoing notification's content; skipped if notifications are not allowed. */
+    fun updateOngoing(context: Context, notice: OngoingNotice) {
+        if (!canPost(context)) return
+        try {
+            NotificationManagerCompat.from(context).notify(ONGOING_ID, ongoing(context, notice))
+        } catch (denied: SecurityException) {
+            // Permission revoked between the check and the call; the old content stays.
+        }
+    }
+
     /** Posts [notice] if the user allows notifications; silently does nothing otherwise. */
     fun postFinished(context: Context, notice: FinishedNotice) {
         if (!canPost(context)) return

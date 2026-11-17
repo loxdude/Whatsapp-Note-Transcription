@@ -3,6 +3,7 @@ package com.local.voicenotes.work
 import com.local.voicenotes.AppUiState
 import com.local.voicenotes.domain.TranscriptionProgress
 import com.local.voicenotes.domain.TranscriptionResult
+import com.local.voicenotes.model.DownloadState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -95,6 +96,22 @@ class WorkNotificationPolicyTest {
             WorkNotificationPolicy.ongoing(state(TranscriptionProgress.Preparing), shareReserved = true)!!.kind)
         // A share that ended without starting anything posts no notice.
         assertNull(WorkNotificationPolicy.finished(WorkKind.SHARE, state(TranscriptionProgress.Failed("prep failed"))))
+    }
+
+    @Test fun transcriptionFinishingDuringAModelDownloadStillGetsItsNotice() {
+        val downloading = DownloadState.Running(10_000_000, 100_000_000)
+        val both = WorkNotificationPolicy.update(emptySet(), state(TranscriptionProgress.Transcribing(0.5f)), download = downloading)
+        assertEquals(setOf(WorkKind.TRANSCRIPTION, WorkKind.DOWNLOAD), both.running)
+        assertTrue(both.finished.isEmpty())
+
+        val transcribed = WorkNotificationPolicy.update(both.running, state(completed("hello")), download = downloading)
+        assertEquals(setOf(WorkKind.DOWNLOAD), transcribed.running)
+        assertEquals(listOf(FinishedNotice("Transcription finished", "hello")), transcribed.finished)
+
+        // The download ending later reports only itself, not the transcription again.
+        val done = WorkNotificationPolicy.update(transcribed.running, state(completed("hello")), download = DownloadState.Failed("offline"))
+        assertTrue(done.running.isEmpty())
+        assertEquals(listOf(FinishedNotice("Model download failed", "offline")), done.finished)
     }
 
     @Test fun lockScreenVersionsShowNeitherFileNameNorTranscript() {
