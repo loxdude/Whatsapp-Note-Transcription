@@ -605,14 +605,16 @@ private fun StatusLine(state: AppUiState, engine: Engine, settled: Boolean) {
             Icon(Icons.Default.Warning, null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(18.dp))
             Text(progress.message, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
         }
-        progress is TranscriptionProgress.Completed -> Row(verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Icon(Icons.Default.CheckCircle, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
-            Text("Finished in ${formatElapsed(state.elapsedMillis)} · saved to history",
-                style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        progress is TranscriptionProgress.Completed -> Transient(progress) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Icon(Icons.Default.CheckCircle, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                Text("Finished in ${formatElapsed(state.elapsedMillis)} · saved to history",
+                    style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
-        progress is TranscriptionProgress.Cancelled -> Text("Cancelled", style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        progress is TranscriptionProgress.Cancelled -> Transient(progress) {
+            Text("Cancelled", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
         !state.canTranscribe -> {
             val hint = when {
                 state.selectedModel == null && engine == Engine.LOCAL -> "Download the on-device model to start"
@@ -621,6 +623,16 @@ private fun StatusLine(state: AppUiState, engine: Engine, settled: Boolean) {
             }
             hint?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
+    }
+}
+
+/** Confirmation that fades out after [millis]; errors and hints stay (they need action). */
+@Composable
+private fun Transient(key: Any, millis: Long = 5_000, content: @Composable () -> Unit) {
+    var visible by remember(key) { mutableStateOf(true) }
+    LaunchedEffect(key) { kotlinx.coroutines.delay(millis); visible = false }
+    AnimatedVisibility(visible = visible, enter = fadeIn(), exit = fadeOut() + androidx.compose.animation.shrinkVertically()) {
+        content()
     }
 }
 
