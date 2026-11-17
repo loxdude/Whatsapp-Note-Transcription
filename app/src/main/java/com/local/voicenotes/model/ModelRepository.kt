@@ -4,11 +4,14 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.util.Log
+import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.local.voicenotes.domain.ImportedModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
@@ -78,6 +81,30 @@ internal object ModelRecords {
         return (listOf(builtInMistral) + imported).distinctBy { it.id }
     }
 
+    /** Stored raw records plus the unparseable stored value to back up before overwriting it. */
+    class StoredRecords<T>(val records: List<T>, val corruptValue: String?)
+
+    /**
+     * Parses the stored list for a read-modify-write. An unparseable outer list is reported
+     * via [StoredRecords.corruptValue] instead of silently looking empty, so the caller can back
+     * it up before the write replaces it.
+     */
+    fun <T> storedForWrite(value: String?, parse: (String) -> List<T>): StoredRecords<T> {
+        if (value.isNullOrBlank()) return StoredRecords(emptyList(), null)
+        return try {
+            StoredRecords(parse(value), null)
+        } catch (error: Exception) {
+            StoredRecords(emptyList(), value)
+        }
+    }
+
+    /**
+     * True when the persisted read grant of [path] may be released because none of the
+     * [remaining] records (by [pathOf]) still points to the same content URI.
+     */
+    fun <T> mayReleaseGrant(path: String, remaining: List<T>, pathOf: (T) -> String?): Boolean =
+        path.startsWith("content:") && remaining.none { pathOf(it) == path }
+
     val builtInMistral = ImportedModel(
         id = BUILT_IN_MISTRAL_ID,
         displayName = "Mistral Voxtral Mini (API)",
@@ -97,8 +124,12 @@ internal object ModelRecords {
  * the model in app-private storage because CompiledModel requires a file path.
  */
 class ModelRepository(private val context: Context) {
+    private companion object { const val TAG = "VoiceNotesBenchmark" }
+
     private val modelsKey = stringPreferencesKey("imported_models")
     private val selectedKey = stringPreferencesKey("selected_model")
+    /** Last model list value that could not be parsed, kept before it is overwritten. */
+    private val corruptBackupKey = stringPreferencesKey("imported_models_corrupt_backup")
 
     /** Reads and checks every stored model on [Dispatchers.IO]; never call-site-thread file I/O. */
     suspend fun models(): List<ImportedModel> = withContext(Dispatchers.IO) {
@@ -140,7 +171,8 @@ class ModelRepository(private val context: Context) {
             null
         )?.use { cursor ->
             require(cursor.moveToFirst()) { "Cannot inspect the selected model." }
-            cursor.getString(0).orEmpty() to cursor.getLong(1)
+            // SIZE may be NULL (unknown); fall back to the descriptor length below.
+            cursor.getString(0).orEmpty() to (if (cursor.isNull(1)) null else cursor.getLong(1))
         }
         val displayName = metadata?.first ?: uri.lastPathSegment.orEmpty()
         val sourceLength = metadata?.second
@@ -150,33 +182,50 @@ class ModelRepository(private val context: Context) {
         validateThenImport(displayName, sourceLength, {
             resolver.openInputStream(uri) ?: error("Cannot read the selected model.")
         }) { evaluation ->
+            val grantedBefore = resolver.persistedUriPermissions.any { it.uri == uri && it.isReadPermission }
             resolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-
-            val hash = MessageDigest.getInstance("SHA-256")
-                .digest("${uri}|$sourceLength".encodeToByteArray())
-                .joinToString("") { "%02x".format(it) }
-            val model = ImportedModel(
-                id = hash,
-                displayName = displayName,
-                path = uri.toString(),
-                sizeBytes = sourceLength,
-                architecture = evaluation.architecture,
-                backend = evaluation.backend,
-                enabled = evaluation.enabled,
-                note = evaluation.note
-            )
-            // Do not persist an import that was cancelled while it was being inspected.
-            coroutineContext.ensureActive()
-            context.modelDataStore.edit { prefs ->
-                // Read-modify-write inside edit: atomic with concurrent writers, and based on the
-                // raw stored records, so temporarily unreadable models are never dropped.
-                val stored = rawRecords(prefs[modelsKey].orEmpty())
-                val updated = ModelRecords.mergeImport(stored, ::recordId, encodeRecord(model), hash)
-                prefs[modelsKey] = JSONArray().apply { updated.forEach { put(it) } }.toString()
+            try {
+                persistImport(uri, displayName, sourceLength, evaluation, onProgress)
+            } catch (error: Throwable) {
+                // Failed or cancelled after taking the grant: give it back unless it predates this
+                // import or a stored record (e.g. an earlier import of the same file) uses it.
+                if (!grantedBefore) withContext(NonCancellable) { releaseGrantIfUnused(uri.toString()) }
+                throw error
             }
-            onProgress(1f)
-            model
         }
+    }
+
+    private suspend fun persistImport(
+        uri: Uri,
+        displayName: String,
+        sourceLength: Long,
+        evaluation: ParakeetUltraModels.Evaluation,
+        onProgress: (Float) -> Unit
+    ): ImportedModel {
+        val hash = MessageDigest.getInstance("SHA-256")
+            .digest("${uri}|$sourceLength".encodeToByteArray())
+            .joinToString("") { "%02x".format(it) }
+        val model = ImportedModel(
+            id = hash,
+            displayName = displayName,
+            path = uri.toString(),
+            sizeBytes = sourceLength,
+            architecture = evaluation.architecture,
+            backend = evaluation.backend,
+            enabled = evaluation.enabled,
+            note = evaluation.note
+        )
+        // Do not persist an import that was cancelled while it was being inspected.
+        coroutineContext.ensureActive()
+        context.modelDataStore.edit { prefs ->
+            // Read-modify-write inside edit: atomic with concurrent writers, and based on the
+            // raw stored records, so temporarily unreadable models are never dropped.
+            val stored = recordsForWrite(prefs)
+            val updated = ModelRecords.mergeImport(stored, ::recordId, encodeRecord(model), hash)
+            prefs[modelsKey] = JSONArray().apply { updated.forEach { put(it) } }.toString()
+        }
+        onProgress(1f)
+        return model
     }
 
     /** Persists the verified, app-private encoder written by [ModelDownload]. */
@@ -193,27 +242,64 @@ class ModelRepository(private val context: Context) {
             note = evaluation.note
         )
         context.modelDataStore.edit { prefs ->
-            val stored = rawRecords(prefs[modelsKey].orEmpty())
+            val stored = recordsForWrite(prefs)
             val updated = ModelRecords.mergeImport(stored, ::recordId, encodeRecord(model), model.id)
             prefs[modelsKey] = JSONArray().apply { updated.forEach { put(it) } }.toString()
         }
         model
     }
 
-    /** Removes the record [id] (the caller deletes any app-private file). */
+    /**
+     * Removes the record [id] (the caller deletes any app-private file). The persisted read
+     * grant of an imported model is released unless another record uses the same URI.
+     */
     suspend fun remove(id: String) = withContext(Dispatchers.IO) {
+        var releasable: String? = null
         context.modelDataStore.edit { prefs ->
-            val kept = rawRecords(prefs[modelsKey].orEmpty()).filterNot { recordId(it) == id }
+            val (removed, kept) = recordsForWrite(prefs).partition { recordId(it) == id }
             prefs[modelsKey] = JSONArray().apply { kept.forEach { put(it) } }.toString()
             if (prefs[selectedKey] == id) prefs.remove(selectedKey)
+            releasable = removed.firstNotNullOfOrNull(::recordPath)
+                ?.takeIf { ModelRecords.mayReleaseGrant(it, kept, ::recordPath) }
+        }
+        releasable?.let(::releaseGrant)
+    }
+
+    private suspend fun releaseGrantIfUnused(path: String) {
+        val stored = runCatching { rawRecords(context.modelDataStore.data.first()[modelsKey].orEmpty()) }
+            .getOrNull() ?: return
+        if (ModelRecords.mayReleaseGrant(path, stored, ::recordPath)) releaseGrant(path)
+    }
+
+    private fun releaseGrant(path: String) {
+        runCatching {
+            context.contentResolver.releasePersistableUriPermission(Uri.parse(path), Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
     }
 
-    private fun rawRecords(value: String): List<Any?> {
-        if (value.isBlank()) return emptyList()
-        val array = runCatching { JSONArray(value) }.getOrNull() ?: return emptyList()
+    private fun parseRecords(value: String): List<Any?> {
+        val array = JSONArray(value)
         return List(array.length()) { array.opt(it) }
     }
+
+    /** Lenient read: an unparseable list reads as empty (writes go through [recordsForWrite]). */
+    private fun rawRecords(value: String): List<Any?> =
+        ModelRecords.storedForWrite(value, ::parseRecords).records
+
+    /**
+     * Stored records for a read-modify-write. If the stored list is unparseable, its raw value
+     * is backed up under [corruptBackupKey] first, so the write cannot lose it for good.
+     */
+    private fun recordsForWrite(prefs: MutablePreferences): List<Any?> {
+        val stored = ModelRecords.storedForWrite(prefs[modelsKey], ::parseRecords)
+        stored.corruptValue?.let {
+            prefs[corruptBackupKey] = it
+            Log.w(TAG, "Stored model list is unreadable; backed it up (${it.length} chars) before overwriting.")
+        }
+        return stored.records
+    }
+
+    private fun recordPath(record: Any?): String? = (record as? JSONObject)?.optString("path")?.takeIf { it.isNotEmpty() }
 
     private fun recordId(record: Any?): String? = (record as? JSONObject)?.optString("id")?.takeIf { it.isNotEmpty() }
 
