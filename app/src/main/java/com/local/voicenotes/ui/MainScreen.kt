@@ -226,7 +226,7 @@ fun MainScreen(
                             onOpenSettings = { showSettings = true }
                         )
                         Engine.CLOUD -> CloudStatus(
-                            state, keyStatus,
+                            keyStatus,
                             onEditKey = { showApiKeyDialog = true }
                         )
                     }
@@ -317,17 +317,6 @@ fun MainScreen(
 
 // ---- Engine status ---------------------------------------------------------------------------
 
-/** Quiet one-line explanation under the switch; no model names, no extra card. */
-@Composable
-private fun StatusCaption(icon: androidx.compose.ui.graphics.vector.ImageVector, text: String, busy: Boolean = false) {
-    Row(Modifier.padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-        if (busy) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-        else Icon(icon, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
-        Spacer(Modifier.width(8.dp))
-        Text(text, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    }
-}
-
 @Composable
 private fun SetupCard(content: @Composable () -> Unit) {
     Card(
@@ -412,41 +401,15 @@ fun DownloadProgress(download: DownloadState, onCancel: () -> Unit) {
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
+/** Cloud needs nothing on screen once a key is saved; only a missing/broken key gets a button. */
 @Composable
-private fun CloudStatus(
-    state: AppUiState,
-    keyStatus: MistralApiKeyStatus?,
-    onEditKey: () -> Unit
-) {
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        StatusCaption(AppIcons.Cloud, "Uploads the audio to Mistral · auto language")
-        FlowRow(
-            Modifier.padding(horizontal = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            when (keyStatus) {
-                null -> Text("Checking API key…", style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(vertical = 14.dp))
-                MistralApiKeyStatus.CONFIGURED -> AssistChip(
-                    onClick = onEditKey, label = { Text("API key saved") },
-                    leadingIcon = {
-                        Icon(Icons.Default.CheckCircle, null, Modifier.size(AssistChipDefaults.IconSize),
-                            tint = MaterialTheme.colorScheme.primary)
-                    }
-                )
-                MistralApiKeyStatus.UNREADABLE -> FilledTonalButton(onClick = onEditKey) {
-                    Icon(Icons.Default.Warning, null, Modifier.size(ButtonDefaults.IconSize))
-                    Spacer(Modifier.width(ButtonDefaults.IconSpacing))
-                    Text("Re-enter API key")
-                }
-                else -> FilledTonalButton(onClick = onEditKey) {
-                    Icon(AppIcons.Key, null, Modifier.size(ButtonDefaults.IconSize))
-                    Spacer(Modifier.width(ButtonDefaults.IconSpacing))
-                    Text("Add API key")
-                }
-            }
-        }
+private fun CloudStatus(keyStatus: MistralApiKeyStatus?, onEditKey: () -> Unit) {
+    val unreadable = keyStatus == MistralApiKeyStatus.UNREADABLE
+    if (keyStatus == null || keyStatus == MistralApiKeyStatus.CONFIGURED) return
+    FilledTonalButton(onClick = onEditKey, modifier = Modifier.padding(horizontal = 4.dp)) {
+        Icon(if (unreadable) Icons.Default.Warning else AppIcons.Key, null, Modifier.size(ButtonDefaults.IconSize))
+        Spacer(Modifier.width(ButtonDefaults.IconSpacing))
+        Text(if (unreadable) "Re-enter API key" else "Add API key")
     }
 }
 
