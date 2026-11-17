@@ -22,12 +22,14 @@ class MistralApiKeyStoreTest {
     private class FakeCipher : ApiKeyCipher {
         var generation = 1
         var failEncrypt = false
+        var transientDecryptFailure = false
         var resets = 0
         override fun encrypt(plainText: String): Pair<String, String> {
             if (failEncrypt) throw IllegalStateException("keystore unavailable")
             return plainText.reversed() to "iv-$generation"
         }
         override fun decrypt(cipherText: String, iv: String): String {
+            if (transientDecryptFailure) throw java.security.ProviderException("keystore busy")
             if (iv != "iv-$generation") throw javax.crypto.AEADBadTagException("tag mismatch")
             return cipherText.reversed()
         }
@@ -84,6 +86,28 @@ class MistralApiKeyStoreTest {
         assertEquals(MistralApiKeyStatus.CONFIGURED, store.status())
     }
 
+    @Test fun transientDecryptFailureKeepsTheKeyAndReportsUnavailable() {
+        store.set("sk-123")
+        val before = prefs.values.toMap()
+        cipher.transientDecryptFailure = true
+        assertEquals(MistralApiKeyResult.Unavailable, store.read())
+        assertEquals(before, prefs.values)
+        assertEquals(0, cipher.resets)
+        assertEquals(MistralApiKeyStatus.CONFIGURED, store.status())
+        assertResolveFails(MistralApiKeyResult.UNAVAILABLE_MESSAGE) { MistralApiKeyResult.Unavailable }
+
+        cipher.transientDecryptFailure = false
+        assertEquals(MistralApiKeyResult.Present("sk-123"), store.read())
+    }
+
+    @Test fun keystoreKeyIsOnlyResetWhenTheUnreadableEntryWasCleared() {
+        store.set("sk-123")
+        cipher.generation++
+        prefs.failWrites = true
+        assertEquals(MistralApiKeyResult.Unreadable, store.read())
+        assertEquals(0, cipher.resets)
+    }
+
     @Test fun halfWrittenEntryIsUnreadable() {
         prefs.values[ApiKeyRepository.ENCRYPTED_KEY] = "abc"
         assertEquals(MistralApiKeyResult.Unreadable, repo.read())
@@ -100,7 +124,7 @@ class MistralApiKeyStoreTest {
 
     @Test fun legacyPlainTextKeyIsMigrated() {
         prefs.values[ApiKeyRepository.LEGACY_KEY] = " sk-legacy "
-        assertEquals(MistralApiKeyStatus.CONFIGURED, repo.status())
+        assertEquals(MistralApiKeyStatus.CONFIGURED_UNENCRYPTED, repo.status())
         assertEquals(MistralApiKeyResult.Present("sk-legacy"), repo.read())
         assertNull(prefs.values[ApiKeyRepository.LEGACY_KEY])
         assertEquals(MistralApiKeyResult.Present("sk-legacy"), repo.read())
@@ -111,6 +135,14 @@ class MistralApiKeyStoreTest {
         cipher.failEncrypt = true
         assertEquals(MistralApiKeyResult.Present("sk-legacy"), repo.read())
         assertEquals("sk-legacy", prefs.values[ApiKeyRepository.LEGACY_KEY])
+        // The UI must not claim encryption while the plain-text value is still stored.
+        assertEquals(MistralApiKeyStatus.CONFIGURED_UNENCRYPTED, repo.status())
+        assertTrue(store.hasKey())
+
+        cipher.failEncrypt = false // The next read retries the migration.
+        assertEquals(MistralApiKeyResult.Present("sk-legacy"), repo.read())
+        assertNull(prefs.values[ApiKeyRepository.LEGACY_KEY])
+        assertEquals(MistralApiKeyStatus.CONFIGURED, repo.status())
     }
 
     @Test fun setFailuresAreReturnedNotThrown() {
@@ -180,8 +212,8 @@ class MistralApiKeyStoreTest {
             override fun decrypt(cipherText: String, iv: String): String {
                 if (pauseDuringDecrypt) pause()
                 val plain = cipherText.removePrefix("cipher-")
-                check(iv == "iv-$plain" && !(pauseDuringDecrypt && plain == "old-synthetic")) {
-                    "synthetic tag mismatch"
+                if (iv != "iv-$plain" || (pauseDuringDecrypt && plain == "old-synthetic")) {
+                    throw javax.crypto.AEADBadTagException("synthetic tag mismatch")
                 }
                 return plain
             }

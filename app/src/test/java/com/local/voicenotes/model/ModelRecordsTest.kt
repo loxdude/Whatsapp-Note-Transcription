@@ -50,6 +50,24 @@ class ModelRecordsTest {
         assertEquals(listOf(stored[0], stored[1], added), merged)
     }
 
+    @Test fun anUnparseableStoredListIsReportedForBackupInsteadOfReadingAsEmpty() {
+        val parse = { value: String -> if (value.startsWith("[")) value.removeSurrounding("[", "]").split(",") else error("corrupt") }
+        val corrupt = ModelRecords.storedForWrite("{broken", parse)
+        assertTrue(corrupt.records.isEmpty())
+        assertEquals("{broken", corrupt.corruptValue)
+        val valid = ModelRecords.storedForWrite("[a,b]", parse)
+        assertEquals(listOf("a", "b"), valid.records)
+        assertNull(valid.corruptValue)
+        assertNull(ModelRecords.storedForWrite(null, parse).corruptValue)
+    }
+
+    @Test fun modelGrantIsReleasedOnlyWhenNoOtherRecordUsesTheUri() {
+        val uri = "content://models/a"
+        assertTrue(ModelRecords.mayReleaseGrant(uri, listOf("content://models/b"), { it }))
+        assertFalse(ModelRecords.mayReleaseGrant(uri, listOf(uri), { it }))
+        assertFalse(ModelRecords.mayReleaseGrant("/data/models/x.tflite", emptyList<String>(), { it }))
+    }
+
     @Test fun catalogFiltersUnreadableButDoesNotTouchStorageAndPutsCloudFirst() {
         val stored = listOf(record("a"), record("gone"))
         val catalog = ModelRecords.catalog(stored) { it.id != "gone" }

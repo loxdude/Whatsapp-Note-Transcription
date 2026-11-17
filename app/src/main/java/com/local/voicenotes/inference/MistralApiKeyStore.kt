@@ -4,11 +4,17 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.util.Base64
+import android.util.Log
 import com.local.voicenotes.concurrent.runCatchingCancellable
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.security.GeneralSecurityException
+import java.security.InvalidAlgorithmParameterException
 import java.security.KeyStore
+import java.security.UnrecoverableKeyException
+import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -28,14 +34,27 @@ sealed interface MistralApiKeyResult {
      */
     data object Unreadable : MistralApiKeyResult
 
+    /**
+     * Reading failed for a reason that may be temporary (e.g. a busy Keystore). Nothing was
+     * deleted; a later read may succeed.
+     */
+    data object Unavailable : MistralApiKeyResult
+
     companion object {
         const val UNREADABLE_MESSAGE = "Saved API key could not be decrypted; enter it again."
+        const val UNAVAILABLE_MESSAGE = "Could not read the API key; try again."
         const val NOT_CONFIGURED_MESSAGE = "Mistral API key not configured."
     }
 }
 
-/** Key status for UI that does not require decrypting the key. */
-enum class MistralApiKeyStatus { CONFIGURED, ABSENT, UNREADABLE }
+/**
+ * Key status for UI that does not require decrypting the key. [CONFIGURED_UNENCRYPTED] is a
+ * legacy plain-text key whose migration to encrypted storage has not succeeded yet.
+ */
+enum class MistralApiKeyStatus { CONFIGURED, CONFIGURED_UNENCRYPTED, ABSENT, UNREADABLE }
+
+val MistralApiKeyStatus.isConfigured: Boolean
+    get() = this == MistralApiKeyStatus.CONFIGURED || this == MistralApiKeyStatus.CONFIGURED_UNENCRYPTED
 
 /**
  * Picks the key for a request. The `MISTRAL_API_KEY` environment override is honoured
@@ -52,8 +71,24 @@ internal fun resolveMistralApiKey(
         is MistralApiKeyResult.Present -> result.key
         MistralApiKeyResult.Absent -> throw IllegalStateException(MistralApiKeyResult.NOT_CONFIGURED_MESSAGE)
         MistralApiKeyResult.Unreadable -> throw IllegalStateException(MistralApiKeyResult.UNREADABLE_MESSAGE)
+        MistralApiKeyResult.Unavailable -> throw IllegalStateException(MistralApiKeyResult.UNAVAILABLE_MESSAGE)
     }
 }
+
+/** Thrown by an [ApiKeyCipher] when its key alias no longer exists; the ciphertext is lost for good. */
+internal class ApiKeyMissingException : GeneralSecurityException("Keystore key missing")
+
+/**
+ * True only for failures that cannot heal on retry: wrong or lost key, tampered or malformed
+ * data. Anything else (Keystore busy, provider hiccups) is treated as transient.
+ */
+internal fun isPermanentDecryptFailure(error: Throwable): Boolean =
+    error is AEADBadTagException ||
+        error is KeyPermanentlyInvalidatedException ||
+        error is UnrecoverableKeyException ||
+        error is ApiKeyMissingException ||
+        error is InvalidAlgorithmParameterException || // malformed IV
+        error is IllegalArgumentException // malformed base64
 
 /** Minimal persistent key/value seam over SharedPreferences. */
 internal interface ApiKeyPreferences {
@@ -76,7 +111,8 @@ internal interface ApiKeyCipher {
 /** Platform-independent API key logic: migration, sealed read results, safe writes. */
 internal class ApiKeyRepository(
     private val prefs: ApiKeyPreferences,
-    private val cipher: ApiKeyCipher
+    private val cipher: ApiKeyCipher,
+    private val log: (String) -> Unit = {}
 ) {
     companion object {
         const val LEGACY_KEY = "mistral_api_key"
@@ -95,21 +131,31 @@ internal class ApiKeyRepository(
         val encrypted = prefs.getString(ENCRYPTED_KEY)
         val iv = prefs.getString(IV_KEY)
         if (encrypted != null || iv != null) {
-            val plain = if (encrypted != null && iv != null) {
-                runCatchingCancellable { cipher.decrypt(encrypted, iv) }.getOrNull()?.trim()
-            } else {
-                null // Half-written entry: cannot be decrypted either.
+            if (encrypted == null || iv == null) {
+                // Half-written entry: cannot be decrypted either.
+                markUnreadable()
+                return MistralApiKeyResult.Unreadable
             }
+            val decrypted = runCatchingCancellable { cipher.decrypt(encrypted, iv) }
+            val error = decrypted.exceptionOrNull()
+            if (error != null && !isPermanentDecryptFailure(error)) {
+                // Keep ciphertext and Keystore key: a transient failure must not destroy the key.
+                log("Reading the API key failed transiently: ${error.javaClass.simpleName}")
+                return MistralApiKeyResult.Unavailable
+            }
+            val plain = decrypted.getOrNull()?.trim()
             if (!plain.isNullOrEmpty()) return MistralApiKeyResult.Present(plain)
             markUnreadable()
             return MistralApiKeyResult.Unreadable
         }
 
         // One-time migration of installations that stored the key as plain text. If the
-        // encrypted write fails, the legacy value stays so the key is not lost.
+        // encrypted write fails, the legacy value stays usable and the next read retries.
         val legacy = prefs.getString(LEGACY_KEY)?.trim()
         if (!legacy.isNullOrEmpty()) {
-            set(legacy)
+            set(legacy).onFailure {
+                log("Encrypting the legacy API key failed; it stays unencrypted: ${it.javaClass.simpleName}")
+            }
             return MistralApiKeyResult.Present(legacy)
         }
         if (prefs.getString(UNREADABLE_FLAG) != null) return MistralApiKeyResult.Unreadable
@@ -119,11 +165,12 @@ internal class ApiKeyRepository(
     /**
      * Status without decrypting. A stored key that has not been read yet reports
      * CONFIGURED; once a read finds it undecryptable it reports UNREADABLE until [set].
+     * A plain-text legacy key that is still on disk reports CONFIGURED_UNENCRYPTED.
      */
     fun status(): MistralApiKeyStatus = synchronized(processLock) {
         when {
-            prefs.getString(ENCRYPTED_KEY) != null || !prefs.getString(LEGACY_KEY).isNullOrBlank() ->
-                MistralApiKeyStatus.CONFIGURED
+            !prefs.getString(LEGACY_KEY).isNullOrBlank() -> MistralApiKeyStatus.CONFIGURED_UNENCRYPTED
+            prefs.getString(ENCRYPTED_KEY) != null -> MistralApiKeyStatus.CONFIGURED
             prefs.getString(UNREADABLE_FLAG) != null -> MistralApiKeyStatus.UNREADABLE
             else -> MistralApiKeyStatus.ABSENT
         }
@@ -143,10 +190,12 @@ internal class ApiKeyRepository(
     }
 
     private fun markUnreadable() {
-        runCatchingCancellable {
+        val cleared = runCatchingCancellable {
             prefs.edit(mapOf(ENCRYPTED_KEY to null, IV_KEY to null, UNREADABLE_FLAG to "1"))
         }
-        runCatchingCancellable { cipher.reset() }
+        // Reset the Keystore key only once the stored entry is really cleared, so the
+        // preferences and the Keystore never disagree about which key is in use.
+        if (cleared.isSuccess) runCatchingCancellable { cipher.reset() }
     }
 }
 
@@ -155,17 +204,21 @@ class MistralApiKeyStore internal constructor(private val repository: ApiKeyRepo
     constructor(context: Context) : this(
         ApiKeyRepository(
             SharedPreferencesApiKeyPreferences(context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)),
-            AndroidKeystoreApiKeyCipher()
+            AndroidKeystoreApiKeyCipher(),
+            log = { Log.w(TAG, it) }
         )
     )
 
     companion object {
         private const val PREFS_NAME = "app_prefs"
+        private const val TAG = "VoiceNotesBenchmark"
     }
 
     /**
      * Reads the key. On [MistralApiKeyResult.Unreadable] the undecryptable ciphertext has
      * already been cleared; show [MistralApiKeyResult.UNREADABLE_MESSAGE] and ask again.
+     * On [MistralApiKeyResult.Unavailable] nothing was changed; show
+     * [MistralApiKeyResult.UNAVAILABLE_MESSAGE] and let the user retry.
      */
     fun read(): MistralApiKeyResult = repository.read()
 
@@ -177,7 +230,7 @@ class MistralApiKeyStore internal constructor(private val repository: ApiKeyRepo
 
     suspend fun statusAsync(): MistralApiKeyStatus = withContext(Dispatchers.IO) { status() }
 
-    fun hasKey(): Boolean = status() == MistralApiKeyStatus.CONFIGURED
+    fun hasKey(): Boolean = status().isConfigured
 
     /** Saves (or, when blank, clears) the key. Failures are returned, never thrown. */
     fun set(value: String): Result<Unit> = repository.set(value)
@@ -208,7 +261,7 @@ private class AndroidKeystoreApiKeyCipher : ApiKeyCipher {
     }
 
     override fun decrypt(cipherText: String, iv: String): String {
-        val key = existingKey() ?: throw IllegalStateException("Keystore key missing")
+        val key = existingKey() ?: throw ApiKeyMissingException()
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, Base64.decode(iv, Base64.NO_WRAP)))
         return cipher.doFinal(Base64.decode(cipherText, Base64.NO_WRAP)).decodeToString()

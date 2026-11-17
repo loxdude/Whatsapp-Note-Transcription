@@ -150,7 +150,7 @@ private fun ApiKeyDialog(
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
                     when (status) {
-                        MistralApiKeyStatus.CONFIGURED -> "A key is saved. Enter a new one to replace it."
+                        MistralApiKeyStatus.CONFIGURED, MistralApiKeyStatus.CONFIGURED_UNENCRYPTED -> "A key is saved. Enter a new one to replace it."
                         MistralApiKeyStatus.UNREADABLE -> "The saved key could not be decrypted. Enter it again."
                         else -> "Paste a key from console.mistral.ai to use cloud transcription."
                     },

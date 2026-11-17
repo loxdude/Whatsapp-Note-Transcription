@@ -237,6 +237,8 @@ class AppGraph(private val app: VoiceNotesApplication) {
     private val mutableDownload = MutableStateFlow<DownloadState>(DownloadState.Idle)
     val modelDownload: StateFlow<DownloadState> = mutableDownload.asStateFlow()
     private var downloadJob: Job? = null
+    /** Set for the whole removal so a new download cannot register a file the removal then deletes. Main thread. */
+    private var removeJob: Job? = null
     private val downloadCall = AtomicReference<Call?>()
     private val download = ModelDownload(
         directory = File(app.noBackupFilesDir, "models"),
@@ -250,7 +252,7 @@ class AppGraph(private val app: VoiceNotesApplication) {
      * (it starts the foreground service). Main thread.
      */
     fun startModelDownload(): Boolean {
-        if (downloadJob?.isCompleted == false) return false
+        if (downloadJob?.isCompleted == false || removeJob?.isCompleted == false) return false
         mutableDownload.value = DownloadState.Running(0, ParakeetUltraDownload.ENCODER_30S.sizeBytes)
         downloadJob = scope.launch {
             try {
@@ -314,14 +316,15 @@ class AppGraph(private val app: VoiceNotesApplication) {
     /** Removes the downloaded encoder to free storage. Rejected while work is running. */
     fun removeDownloadedModel(): Boolean {
         if (coordinator.state.value.busy || mutableDownload.value.active) return false
+        if (downloadJob?.isCompleted == false || removeJob?.isCompleted == false) return false
         val wasSelected = coordinator.state.value.selectedModelId == ParakeetUltraDownload.MODEL_ID
         if (wasSelected && !coordinator.clearSelection()) return false
-        scope.launch {
+        removeJob = scope.launch {
             runCatching {
                 repository.remove(ParakeetUltraDownload.MODEL_ID)
                 withContext(Dispatchers.IO) { download.delete() }
             }.onFailure { log("Removing the downloaded model failed: ${it.message}") }
-            coordinator.refreshModels()
+            coordinator.refreshModels().join()
         }
         return true
     }

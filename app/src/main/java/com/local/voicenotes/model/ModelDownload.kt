@@ -63,7 +63,10 @@ class ModelDownload(
     val target: File get() = File(directory, spec.fileName)
     private val partial: File get() = File(directory, spec.fileName + ".partial")
 
-    /** Size check suffices: [target] only ever comes into existence by renaming a hash-verified partial. */
+    /**
+     * Cheap size check for the UI. [run] re-verifies the SHA-256 of an existing target before
+     * returning it, so a file corrupted after its rename is never handed out as complete.
+     */
     fun isComplete(): Boolean = target.isFile && target.length() == spec.sizeBytes
 
     fun run(
@@ -71,9 +74,21 @@ class ModelDownload(
         onProgress: (downloaded: Long, total: Long) -> Unit,
         onVerifying: () -> Unit = {}
     ): File {
-        if (isComplete()) return target
+        if (target.isFile && target.length() == spec.sizeBytes) {
+            onVerifying()
+            if (matchesPin(target, checkCancelled)) return target
+        }
         if (!directory.isDirectory && !directory.mkdirs()) throw IOException("Cannot create the model folder.")
         target.delete()
+        if (partial.isFile && partial.length() == spec.sizeBytes) {
+            // The process died after the final sync but before the rename: verify instead of refetching.
+            onVerifying()
+            if (matchesPin(partial, checkCancelled)) {
+                if (!partial.renameTo(target)) throw IOException("Cannot store the downloaded model.")
+                return target
+            }
+            partial.delete()
+        }
         var offset = partial.length().takeIf { partial.isFile && it < spec.sizeBytes } ?: 0L
         if (offset == 0L) partial.delete()
 
@@ -132,14 +147,20 @@ class ModelDownload(
         partial.delete()
     }
 
-    private fun hashPrefix(digest: MessageDigest, length: Long, checkCancelled: () -> Unit) {
-        FileInputStream(partial).use { input ->
+    private fun matchesPin(file: File, checkCancelled: () -> Unit): Boolean {
+        val digest = MessageDigest.getInstance("SHA-256")
+        hashPrefix(digest, file.length(), checkCancelled, file)
+        return digest.digest().joinToString("") { "%02x".format(it) }.equals(spec.sha256, ignoreCase = true)
+    }
+
+    private fun hashPrefix(digest: MessageDigest, length: Long, checkCancelled: () -> Unit, file: File = partial) {
+        FileInputStream(file).use { input ->
             val buffer = ByteArray(bufferSize)
             var remaining = length
             while (remaining > 0) {
                 checkCancelled()
                 val read = input.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
-                if (read < 0) throw IOException("The partial download shrank; tap Retry.")
+                if (read < 0) throw IOException("The model file shrank while it was verified; tap Retry.")
                 digest.update(buffer, 0, read)
                 remaining -= read
             }
