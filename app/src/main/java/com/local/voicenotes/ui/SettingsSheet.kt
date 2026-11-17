@@ -30,6 +30,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
@@ -70,7 +71,7 @@ import com.local.voicenotes.model.TranslationModel
 import com.local.voicenotes.model.TranslationSettings
 import com.local.voicenotes.model.active
 import com.local.voicenotes.model.formatBytes
-import com.local.voicenotes.model.translationModelsReplacedBy
+import com.local.voicenotes.model.installedTranslationSpecs
 import com.local.voicenotes.translate.TranslationText
 
 /** Attribution for the bundled and downloadable models and native libraries. */
@@ -101,9 +102,8 @@ fun SettingsSheet(
     val modelPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(viewModel::importModel)
     }
-    /** Spec id (or [TRANSLATION_MODELS]) whose removal awaits confirmation. */
+    /** Spec id whose removal awaits confirmation. */
     var confirmRemove by rememberSaveable { mutableStateOf<String?>(null) }
-    var confirmSwitch by remember { mutableStateOf<Pair<TranslationModel, List<String>>?>(null) }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     ModalBottomSheet(
@@ -204,27 +204,32 @@ fun SettingsSheet(
                         onValueChange = { viewModel.setTranslationSettings(translation.copy(enabled = it)) }
                     )
                 )
-                val installedTranslation = TranslationModel.specs.filter { it.id in installed }
+                val installedTranslation = installedTranslationSpecs(installed)
                 if (translation.enabled) {
                     HorizontalDivider(color = MaterialTheme.colorScheme.surfaceContainerLow)
                     TranslationOptions(
                         translation = translation, installed = installed, downloads = downloads,
                         onDownload = onDownload, viewModel = viewModel,
-                        onSwitch = { model, replaced -> confirmSwitch = model to replaced },
-                        onRemove = { confirmRemove = TRANSLATION_MODELS }
+                        onRemove = { spec -> confirmRemove = spec.id }
                     )
                 } else if (installedTranslation.isNotEmpty()) {
                     HorizontalDivider(color = MaterialTheme.colorScheme.surfaceContainerLow)
-                    ListItem(
-                        headlineContent = { Text("Translation model installed") },
-                        supportingContent = { Text(formatBytes(installedTranslation.sumOf { it.sizeBytes })) },
-                        trailingContent = {
-                            TextButton(onClick = { confirmRemove = TRANSLATION_MODELS }) {
-                                Text("Remove", color = MaterialTheme.colorScheme.error)
-                            }
-                        },
-                        colors = ListItemDefaults.colors(containerColor = Color.Transparent)
-                    )
+                    installedTranslation.forEach { spec ->
+                        val model = TranslationModel.entries.first { it.spec.id == spec.id }
+                        ListItem(
+                            headlineContent = { Text(model.label) },
+                            supportingContent = { Text(formatBytes(spec.sizeBytes)) },
+                            trailingContent = {
+                                IconButton(onClick = { confirmRemove = spec.id }) {
+                                    Icon(
+                                        AppIcons.Delete, contentDescription = "Remove ${model.label}",
+                                        tint = MaterialTheme.colorScheme.error
+                                    )
+                                }
+                            },
+                            colors = ListItemDefaults.colors(containerColor = Color.Transparent)
+                        )
+                    }
                 }
             }
 
@@ -282,32 +287,21 @@ fun SettingsSheet(
     }
 
     confirmRemove?.let { target ->
-        val specs = if (target == TRANSLATION_MODELS) TranslationModel.specs.filter { it.id in installed }
-        else listOfNotNull(ModelSpecs.byId(target))
-        RemoveModelDialog(
-            title = if (target == TRANSLATION_MODELS) "Remove the translation model?" else "Remove the ${specs.firstOrNull()?.title ?: "model"}?",
-            sizeBytes = specs.sumOf { it.sizeBytes },
-            onConfirm = {
-                confirmRemove = null
-                if (target == TRANSLATION_MODELS) viewModel.removeTranslationModels()
-                else specs.firstOrNull()?.let(viewModel::removeSpeechModel)
-            },
-            onDismiss = { confirmRemove = null }
-        )
-    }
-    confirmSwitch?.let { (model, replaced) ->
-        val removed = TranslationModel.specs.filter { it.id in replaced }
-        SwitchTranslationModelDialog(
-            removed = removed.joinToString { it.title },
-            sizeBytes = removed.sumOf { it.sizeBytes },
-            onConfirm = { confirmSwitch = null; viewModel.switchTranslationModel(model) },
-            onDismiss = { confirmSwitch = null }
-        )
+        val spec = ModelSpecs.byId(target)
+        if (spec != null) {
+            RemoveModelDialog(
+                title = "Remove the ${spec.title}?",
+                sizeBytes = spec.sizeBytes,
+                onConfirm = {
+                    confirmRemove = null
+                    if (TranslationModel.specs.any { it.id == target }) viewModel.removeTranslationModel(spec)
+                    else viewModel.removeSpeechModel(spec)
+                },
+                onDismiss = { confirmRemove = null }
+            )
+        }
     }
 }
-
-/** Marker for "all translation models" in the removal confirmation. */
-private const val TRANSLATION_MODELS = "translation-models"
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -317,30 +311,39 @@ private fun TranslationOptions(
     downloads: Map<String, DownloadState>,
     onDownload: (DownloadSpec) -> Unit,
     viewModel: AppViewModel,
-    onSwitch: (TranslationModel, List<String>) -> Unit,
-    onRemove: () -> Unit
+    onRemove: (DownloadSpec) -> Unit
 ) {
-    val spec = translation.model.spec
-    val download = downloads[spec.id] ?: DownloadState.Idle
     val anyActive = TranslationModel.specs.any { (downloads[it.id] ?: DownloadState.Idle).active }
     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("Model", style = MaterialTheme.typography.titleSmall)
         TranslationModel.entries.forEach { model ->
-            ChoiceRow(
-                label = model.label, detail = null, selected = model == translation.model, enabled = !anyActive,
-                onClick = {
-                    if (model != translation.model) {
-                        val replaced = translationModelsReplacedBy(model, installed)
-                        if (replaced.isEmpty()) viewModel.switchTranslationModel(model)
-                        else onSwitch(model, replaced.map { it.id })
+            val spec = model.spec
+            val download = downloads[spec.id] ?: DownloadState.Idle
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    ChoiceRow(
+                        label = model.label, detail = null, selected = model == translation.model,
+                        enabled = !anyActive, modifier = Modifier.weight(1f),
+                        onClick = { if (model != translation.model) viewModel.switchTranslationModel(model) }
+                    )
+                    if (spec.id in installed) {
+                        IconButton(onClick = { onRemove(spec) }) {
+                            Icon(
+                                AppIcons.Delete, contentDescription = "Remove ${model.label}",
+                                tint = MaterialTheme.colorScheme.error
+                            )
+                        }
                     }
                 }
-            )
+                if (spec.id !in installed) {
+                    ModelDownloadControls(
+                        spec = spec, installed = false, download = download, busy = false,
+                        onDownload = { onDownload(spec) }, onCancel = viewModel::cancelModelDownload,
+                        onRemove = { onRemove(spec) }
+                    )
+                }
+            }
         }
-        ModelDownloadControls(
-            spec = spec, installed = spec.id in installed, download = download, busy = false,
-            onDownload = { onDownload(spec) }, onCancel = viewModel::cancelModelDownload, onRemove = onRemove
-        )
         Text("Translate into", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(top = 6.dp))
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             TargetLanguage.entries.forEach { target ->
@@ -377,9 +380,12 @@ private fun TranslationOptions(
 
 /** A radio option with an optional second line. */
 @Composable
-private fun ChoiceRow(label: String, detail: String?, selected: Boolean, enabled: Boolean, onClick: () -> Unit) {
+private fun ChoiceRow(
+    label: String, detail: String?, selected: Boolean, enabled: Boolean, onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
     Row(
-        Modifier.fillMaxWidth().selectable(selected = selected, enabled = enabled, role = Role.RadioButton, onClick = onClick)
+        modifier.fillMaxWidth().selectable(selected = selected, enabled = enabled, role = Role.RadioButton, onClick = onClick)
             .padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {

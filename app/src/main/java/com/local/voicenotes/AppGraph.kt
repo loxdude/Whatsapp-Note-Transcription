@@ -28,7 +28,6 @@ import com.local.voicenotes.model.ParakeetUltraModels
 import com.local.voicenotes.model.SettingsStore
 import com.local.voicenotes.model.TranslationModel
 import com.local.voicenotes.model.TranslationSettings
-import com.local.voicenotes.model.translationModelsReplacedBy
 import com.local.voicenotes.translate.GemmaTranslator
 import com.local.voicenotes.translate.TranslationController
 import com.local.voicenotes.translate.TranslationText
@@ -376,24 +375,34 @@ class AppGraph(private val app: VoiceNotesApplication) {
     }
 
     /**
-     * Switches the translation model and removes the other installed one (only one is kept).
-     * Returns false while a download or removal runs.
+     * Switches the translation model. Both models may stay installed; only the selection
+     * changes. The loaded engine is released, so at most one Gemma engine stays in memory
+     * (the next translation loads the newly selected model). Returns false while a download
+     * or removal runs.
      */
     fun switchTranslationModel(model: TranslationModel): Boolean {
         if (downloads.busy) return false
-        val replaced = translationModelsReplacedBy(model, downloads.installed.value)
         translation.cancel()
+        translator.releaseLater()
         setTranslationSettings(mutableTranslationSettings.value.copy(model = model))
-        if (replaced.isNotEmpty()) downloads.remove(replaced, beforeDelete = { translator.release() })
         return true
     }
 
-    /** Removes every downloaded translation model. */
-    fun removeTranslationModels(): Boolean {
+    /**
+     * Removes one downloaded translation model to free storage; the selection is kept, so the
+     * Translate button disappears until the selected model is downloaded again. If the removed
+     * model is the loaded one, its engine is released first. Rejected while a download or
+     * removal runs.
+     */
+    fun removeTranslationModel(spec: DownloadSpec): Boolean {
         if (downloads.busy) return false
         translation.cancel()
-        val installed = TranslationModel.specs.filter { it.id in downloads.installed.value }
-        return downloads.remove(installed, beforeDelete = { translator.release() })
+        return downloads.remove(
+            listOf(spec),
+            beforeDelete = {
+                if (translator.isLoaded(downloads.file(spec))) translator.release()
+            }
+        )
     }
 
     // ---- Translation -------------------------------------------------------------------

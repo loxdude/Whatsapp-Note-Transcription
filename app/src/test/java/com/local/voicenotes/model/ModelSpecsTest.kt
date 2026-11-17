@@ -45,10 +45,11 @@ class ModelSpecsTest {
         assertEquals("Swiss French", french.languageName)
     }
 
-    @Test fun switchingTranslationModelReplacesOnlyTheOtherInstalledOne() {
+    @Test fun bothTranslationModelsCanBeInstalledAtOnce() {
         val both = setOf(ModelSpecs.GEMMA_E4B.id, ModelSpecs.GEMMA_E2B.id, ModelSpecs.COHERE_ARABIC.id)
-        assertEquals(listOf(ModelSpecs.GEMMA_E4B), translationModelsReplacedBy(TranslationModel.GEMMA_E2B, both))
-        assertEquals(emptyList<DownloadSpec>(), translationModelsReplacedBy(TranslationModel.GEMMA_E4B, setOf(ModelSpecs.GEMMA_E4B.id)))
+        assertEquals(listOf(ModelSpecs.GEMMA_E4B, ModelSpecs.GEMMA_E2B), installedTranslationSpecs(both))
+        assertEquals(listOf(ModelSpecs.GEMMA_E2B), installedTranslationSpecs(setOf(ModelSpecs.GEMMA_E2B.id)))
+        assertEquals(emptyList<DownloadSpec>(), installedTranslationSpecs(setOf(ModelSpecs.PARAKEET.id)))
     }
 
     @Test fun localChoicePicksOnlyItsOwnModel() {

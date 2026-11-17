@@ -57,6 +57,9 @@ class GemmaTranslator(
     /** Frees the engine (and its GPU memory) once the current call returned. */
     suspend fun release() = withContext(dispatcher) { closeEngine() }
 
+    /** True when the engine currently loaded is [model]'s file. */
+    suspend fun isLoaded(model: File): Boolean = withContext(dispatcher) { enginePath == model.absolutePath }
+
     /** Fire-and-forget [release] for callbacks that cannot suspend (trim memory). */
     fun releaseLater() { executor.execute { closeEngine() } }
 

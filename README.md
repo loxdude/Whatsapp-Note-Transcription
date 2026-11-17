@@ -23,7 +23,7 @@ Cloud: create a key at [console.mistral.ai](https://console.mistral.ai), add it 
 
 Arabic: in Settings under Local transcription, choose "Arabic (Cohere)" and download the 1.5 GB model. Local transcription then treats every note as Arabic. Switch back to Parakeet at any time; both models can stay installed.
 
-Translation: turn on Translation in Settings, pick Gemma 4 E4B (3.7 GB, better) or E2B (2.6 GB, faster), download it and choose the target language (English, German, Arabic or a custom one). A Translate button then appears under every transcript. The translation runs on the phone and is saved with the transcript in the history. The first translation after starting the app loads the model, which takes 5 to 50 seconds depending on the phone.
+Translation: turn on Translation in Settings, pick Gemma 4 E4B (3.7 GB, better) or E2B (2.6 GB, faster), download it and choose the target language (English, German, Arabic or a custom one). Both models can stay installed; switching only changes which one is used. A Translate button then appears under every transcript. The translation runs on the phone and is saved with the transcript in the history. The first translation after starting the app loads the model, which takes 5 to 50 seconds depending on the phone.
 
 All downloads are pinned to a fixed revision and checked against their size and SHA-256, and they resume after an interruption.
 

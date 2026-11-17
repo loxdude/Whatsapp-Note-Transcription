@@ -90,12 +90,9 @@ enum class TranslationModel(val label: String, val spec: DownloadSpec) {
     }
 }
 
-/**
- * Installed translation models other than [model]. Only one is kept on the device, so these
- * are removed when the user switches to [model].
- */
-fun translationModelsReplacedBy(model: TranslationModel, installed: Set<String>): List<DownloadSpec> =
-    TranslationModel.specs.filter { it.id in installed && it != model.spec }
+/** The installed translation specs, in [TranslationModel] order. Both may be installed at once. */
+fun installedTranslationSpecs(installed: Set<String>): List<DownloadSpec> =
+    TranslationModel.specs.filter { it.id in installed }
 
 /** Language the transcript is translated into. [CUSTOM] uses a name the user typed. */
 enum class TargetLanguage(val label: String) {

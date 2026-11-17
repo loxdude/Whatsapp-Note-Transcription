@@ -88,19 +88,6 @@ fun RemoveModelDialog(title: String, sizeBytes: Long, onConfirm: () -> Unit, onD
     )
 }
 
-/** Only one translation model is kept: switching removes the installed one. */
-@Composable
-fun SwitchTranslationModelDialog(removed: String, sizeBytes: Long, onConfirm: () -> Unit, onDismiss: () -> Unit) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        icon = { Icon(AppIcons.Translate, null) },
-        title = { Text("Switch translation model?") },
-        text = { Text("The installed $removed is removed (${formatBytes(sizeBytes)}). The new model needs its own download.") },
-        confirmButton = { Button(onClick = onConfirm) { Text("Switch") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
-    )
-}
-
 /** Loads the saved-key status asynchronously (it may wait on the key store lock), then edits it. */
 @Composable
 fun ApiKeyDialogHost(viewModel: AppViewModel, onDismiss: () -> Unit) {

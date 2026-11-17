@@ -144,7 +144,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun setLocalModel(choice: LocalModelChoice): Boolean = graph.setLocalModel(choice)
     fun setTranslationSettings(settings: TranslationSettings) = graph.setTranslationSettings(settings)
     fun switchTranslationModel(model: TranslationModel): Boolean = graph.switchTranslationModel(model)
-    fun removeTranslationModels(): Boolean = graph.removeTranslationModels()
+    fun removeTranslationModel(spec: DownloadSpec): Boolean = graph.removeTranslationModel(spec)
     fun translate(): Boolean = graph.translate()
     fun cancelTranslation() = graph.cancelTranslation()
 
