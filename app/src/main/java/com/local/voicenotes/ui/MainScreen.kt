@@ -335,14 +335,8 @@ private fun LocalStatus(
             Text("Setting up on-device transcription", style = MaterialTheme.typography.titleMedium)
             DownloadProgress(download, onCancelDownload)
         }
-        local != null -> {
-            val loading = state.progress is TranscriptionProgress.LoadingModel
-            StatusCaption(
-                AppIcons.Shield,
-                if (loading) "Getting ready…" else "Private · on this phone · auto language",
-                busy = loading
-            )
-        }
+        // Ready: nothing to say; loading is shown in the bottom bar.
+        local != null -> Unit
         else -> SetupCard {
             Text("Set up on-device transcription", style = MaterialTheme.typography.titleMedium)
             Text(

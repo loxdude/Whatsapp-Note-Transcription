@@ -1,3 +1,6 @@
 <resources>
-    <color name="ic_launcher_background">#3A6A47</color>
+    <!-- Material You tonal palette of the current wallpaper (accent1 = primary). -->
+    <color name="ic_launcher_background">@android:color/system_accent1_100</color>
+    <color name="ic_launcher_bubble">@android:color/system_accent1_600</color>
+    <color name="ic_launcher_wave">@android:color/system_accent1_50</color>
 </resources>

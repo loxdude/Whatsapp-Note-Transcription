@@ -20,10 +20,10 @@ Local decoding accepts up to 15 minutes of audio. The Mistral path uploads the s
 
 ## Interface
 
-Material 3 with Material You: colours follow the wallpaper (switchable to a built-in green palette), and the theme follows the system or is forced to light/dark in settings.
+Material 3 with Material You: colours follow the wallpaper, including the adaptive launcher icon (system accent tones plus a monochrome layer for themed icons) (switchable to a built-in green palette), and the theme follows the system or is forced to light/dark in settings.
 
 - **Local / Cloud switch** at the top. Local runs Parakeet Ultra on the phone; Cloud uses Mistral Voxtral. Choosing Local without an installed model selects nothing, so audio is never uploaded while the switch says Local.
-- A one-line status under the switch (private/on this phone, or uploads to Mistral, both with automatic language detection). A setup card with the one-tap download appears only while no local model is installed; Cloud shows the API-key status. There is no language picker: both engines detect the language.
+- Local shows nothing extra once ready; Cloud shows one line (uploads to Mistral, automatic language). A setup card with the one-tap download appears only while no local model is installed; Cloud shows the API-key status. There is no language picker: both engines detect the language.
 - **Audio card** with WhatsApp and Files pickers; a waveform animates while work runs.
 - **Transcript card**: editable, with copy and share.
 - **Bottom bar**: the large Transcribe button, stage/percent/elapsed progress, Cancel, and the finished/failed status.
