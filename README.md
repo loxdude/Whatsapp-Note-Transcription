@@ -17,7 +17,7 @@ Get the APK from the [releases page](https://github.com/loxdude/Whatsapp-Note-Tr
 
 Local: tap Download once. The app fetches the 665 MB encoder and checks its SHA-256 before using it. If the connection drops, tap Retry and it continues where it stopped. Then pick a note and tap Transcribe. If you already have `parakeet_ultra_encoder_30s_i8.tflite`, you can import it in Settings instead.
 
-Cloud: create a key at [console.mistral.ai](https://console.mistral.ai), add it in Settings and switch to Cloud. The app uploads the original audio file to Mistral. The key is encrypted with AES-GCM using a key held in Android Keystore.
+Cloud: create a key at [console.mistral.ai](https://console.mistral.ai), add it in Settings and switch to Cloud. The app uploads the original audio file to Mistral. It asks once before the first upload, and you can take that back in Settings. Audio shared from another app is never uploaded until you tap Transcribe. The key is encrypted with AES-GCM using a key held in Android Keystore.
 
 The app never switches to the cloud by itself. If Local is selected and no model is installed, it asks you to download one.
 
