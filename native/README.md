@@ -1,4 +1,10 @@
-# Native Ogg Opus decoder
+# Native libraries
+
+Two prebuilt arm64 libraries ship in `app/src/main/jniLibs/arm64-v8a/`: the Ogg Opus decoder
+(`libvoicenotes_opus.so`, below) and the Arabic speech engine (`libvoicenotes_cohere.so`, see
+[Cohere Transcribe Arabic](#cohere-transcribe-arabic) at the end).
+
+## Ogg Opus decoder
 
 The normal Android Gradle build packages the checked-in arm64 library at
 `app/src/main/jniLibs/arm64-v8a/libvoicenotes_opus.so`. It needs no NDK or network.
@@ -113,3 +119,29 @@ takes the Android route and produces exactly 13,440,000 output samples. The runn
 every valid Opus note, the Android route for WAV/MP3, and cancellation during native open. Native host decoding was also checked against ffmpeg's
 libopus decoder on all 29 real notes. PCM/transcripts can differ slightly from
 Android's codec; do not assume bit-identical ASR output.
+
+## Cohere Transcribe Arabic
+
+`libvoicenotes_cohere.so` (about 1.6 MB stripped) is a small JNI shim (`native/cohere/cohere_jni.cpp`)
+statically linked with the Cohere backend of [CrispASR](https://github.com/CrispStrobe/CrispASR),
+its `crispasr-core` helpers and ggml (CPU only). It needs no OpenMP and no other library than
+the system's libc, libm, libdl and liblog. Rebuild it with:
+
+```sh
+ANDROID_NDK_HOME=/path/to/android-ndk-r27c bash native/cohere/build.sh
+```
+
+The script fetches CrispASR at commit `bae18989da572cacfb8ab7a186f086ebe0932e2a` (ggml submodule
+`1b972bb7`) into `build/native-deps/CrispASR`, refuses a checkout at another commit or with local
+changes, builds the `cohere` target for arm64 (API 31, `armv8.2-a+dotprod+fp16`, 16 KB pages),
+links and strips the shim and copies it into the source tree. `CRISPASR_SRC` points it at an
+existing checkout instead.
+
+The shim cuts audio into windows of at most 30 s at the quietest 100 ms of each window's last
+5 s (the same rule as CrispASR's own long-audio path), transcribes them one by one with the
+language fixed to Arabic, and calls back into Kotlin after each window for progress and
+cancellation. A cancelled transcription stops after the current window. The thread count is the
+number of cores faster than the slowest cluster, between 2 and 6.
+
+Measured on a OnePlus 12 (6 threads): a 30 s Arabic note takes about 14 s, the model loads in
+under a second once its file is in the page cache.

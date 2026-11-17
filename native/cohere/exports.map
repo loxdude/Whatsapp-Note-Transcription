@@ -1,0 +1,6 @@
+{
+  global:
+    Java_com_local_voicenotes_inference_NativeCohere_*;
+  local:
+    *;
+};
