@@ -5,6 +5,7 @@ import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.net.Uri
+import android.provider.OpenableColumns
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
@@ -55,14 +56,23 @@ class AndroidAudioDecoder(private val resolver: ContentResolver) {
         resolver.openAssetFileDescriptor(uri, "r")?.use { descriptor ->
             val job = coroutineContext
             val status = IntArray(1)
-            // Android may tag pointers in the high byte: valid opaque handles can be negative.
-            val handle = NativeOpus.open(
-                descriptor.parcelFileDescriptor.fd, descriptor.startOffset, descriptor.length,
-                NativeOpusControl { !job.isActive }, status
+            val fd = descriptor.parcelFileDescriptor
+            val length = OpusPcm.nativeInputLength(
+                descriptor.declaredLength, descriptor.startOffset, runCatching { fd.statSize }.getOrDefault(-1L)
             )
+            // Android may tag pointers in the high byte: valid opaque handles can be negative.
+            val handle = NativeOpus.open(fd.fd, descriptor.startOffset, length, NativeOpusControl { !job.isActive }, status)
             if (handle == 0L) {
                 OpusPcm.checkNativeFailure(status[0]) { job.ensureActive() }
                 return null // Not Ogg Opus, malformed header or non-seekable provider.
+            }
+            if (length < 0) {
+                try {
+                    OpusPcm.checkReportedSize(reportedSize(uri))
+                } catch (error: Throwable) {
+                    NativeOpus.close(handle)
+                    throw error
+                }
             }
             val source = object : OpusPcmSource {
                 override val totalFrames: Long get() = NativeOpus.total(handle)
@@ -77,6 +87,13 @@ class AndroidAudioDecoder(private val resolver: ContentResolver) {
         }
         return null
     }
+
+    /** Provider-reported byte size, null if unknown. */
+    private fun reportedSize(uri: Uri): Long? = runCatching {
+        resolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getLong(0) else null
+        }
+    }.getOrNull()
 
     private suspend fun decodePlatform(uri: Uri, onProgress: (Float) -> Unit): FloatArray {
         val descriptor = resolver.openAssetFileDescriptor(uri, "r")
@@ -131,9 +148,11 @@ class AndroidAudioDecoder(private val resolver: ContentResolver) {
         // Stage timings (logged once per decode) to find where long notes spend their time.
         var inNs = 0L; var outWaitNs = 0L; var monoNs = 0L; var resampleNs = 0L; var progressNs = 0L
         var loops = 0; var tryAgain = 0; var buffers = 0
+        val watchdog = DecoderStallWatchdog()
         while (!outputEnded) {
             loops++
             coroutineContext.ensureActive()
+            watchdog.check()
             val inStart = System.nanoTime()
             if (!inputEnded) {
                 val index = codec.dequeueInputBuffer(TIMEOUT_US)
@@ -147,6 +166,7 @@ class AndroidAudioDecoder(private val resolver: ContentResolver) {
                         codec.queueInputBuffer(index, 0, size, extractor.sampleTime, 0)
                         extractor.advance()
                     }
+                    watchdog.progressed()
                 }
             }
             val outStart = System.nanoTime()
@@ -156,6 +176,7 @@ class AndroidAudioDecoder(private val resolver: ContentResolver) {
             if (outIndex == MediaCodec.INFO_TRY_AGAIN_LATER) tryAgain++
             when (val index = outIndex) {
                 MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                    watchdog.progressed()
                     val format = codec.outputFormat
                     sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
                     channels = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
@@ -170,6 +191,7 @@ class AndroidAudioDecoder(private val resolver: ContentResolver) {
                 }
                 MediaCodec.INFO_TRY_AGAIN_LATER, MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED -> Unit
                 else -> if (index >= 0) {
+                    watchdog.progressed()
                     if (info.size > 0) {
                         val buffer = codec.getOutputBuffer(index) ?: error("Decoder output buffer unavailable.")
                         buffer.position(info.offset)

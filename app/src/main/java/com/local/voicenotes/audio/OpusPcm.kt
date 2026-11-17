@@ -24,6 +24,31 @@ internal object OpusPcm {
         }
     }
 
+    /** Mirrors the native MAX_INPUT_BYTES cap on confirmed Ogg Opus input. */
+    const val MAX_INPUT_BYTES = 64L * 1024 * 1024
+
+    /**
+     * Length to hand to the native decoder. A declared length wins; otherwise the size of a
+     * regular file ([statSize], -1 if the fd cannot be stat'ed as one) minus the asset
+     * offset, so the native 64 MiB cap also applies when the provider reports no length.
+     * -1 keeps the native aggregate read budget as the only bound.
+     */
+    fun nativeInputLength(declared: Long, startOffset: Long, statSize: Long): Long = when {
+        declared >= 0 -> declared
+        statSize >= 0 -> (statSize - startOffset).coerceAtLeast(0)
+        else -> -1
+    }
+
+    /**
+     * Applied after native opening identified Ogg Opus when no length reached native code:
+     * a provider-reported [size] above the cap is rejected like a known oversize length.
+     */
+    fun checkReportedSize(size: Long?) {
+        if (size != null && size > MAX_INPUT_BYTES) {
+            throw IllegalArgumentException("Opus input exceeds native parser safety limits.")
+        }
+    }
+
     fun capacityForFrames(frames: Long): Int = if (frames > 0)
         ((frames + 1) / 3).coerceIn(1, 16_000L * 60 * 15).toInt() else 16_000 * 60
 
