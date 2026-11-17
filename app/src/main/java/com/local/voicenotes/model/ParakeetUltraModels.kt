@@ -20,8 +20,9 @@ internal object ParakeetUltraModels {
     private const val LEGACY_QNN_BACKEND_PREFIX = "litert-qnn"
 
     const val V3_REPLACED_NOTE =
-        "Parakeet v3 was replaced by Parakeet Ultra — import parakeet_ultra_encoder_30s_i8.tflite " +
-            "(or 10s on slower phones)"
+        "Parakeet v3 was replaced by Parakeet Ultra — download the model or import parakeet_ultra_encoder_30s_i8.tflite"
+    const val SHORT_WINDOW_NOTE =
+        "Only the 30 s encoder is supported — download the model or import parakeet_ultra_encoder_30s_i8.tflite"
 
     private val encoderPattern =
         Regex("parakeet_ultra_encoder_(10|20|30)s_(i8|f16)\\.tflite", RegexOption.IGNORE_CASE)
@@ -39,6 +40,7 @@ internal object ParakeetUltraModels {
 
     data class Encoder(val windowSeconds: Int, val precision: String) {
         val isCpu: Boolean get() = precision == "i8"
+        val isSupported: Boolean get() = isCpu && windowSeconds == 30
     }
 
     /** Strips duplicate-download suffixes so "x (1).tflite" is treated as "x.tflite". */
@@ -62,15 +64,16 @@ internal object ParakeetUltraModels {
         val encoder = parseEncoder(name)
         val lower = normalizeName(name).lowercase()
         return when {
-            encoder != null && encoder.isCpu -> Evaluation(CPU_BACKEND, true, summary(encoder))
+            encoder != null && encoder.isSupported -> Evaluation(CPU_BACKEND, true, summary(encoder))
+            encoder != null && encoder.isCpu -> Evaluation(CPU_BACKEND, false, SHORT_WINDOW_NOTE)
             encoder != null -> Evaluation(CPU_BACKEND, false, F16_NOTE)
             "_mel_" in lower || "_decoder_" in lower -> Evaluation(
                 CPU_BACKEND, false,
-                "Bundled with the app; import a parakeet_ultra_encoder_{10|20|30}s_i8.tflite encoder"
+                "Bundled with the app; import parakeet_ultra_encoder_30s_i8.tflite"
             )
             else -> Evaluation(
                 CPU_BACKEND, false,
-                "Not a Parakeet Ultra encoder; import parakeet_ultra_encoder_{10|20|30}s_i8.tflite"
+                "Not a Parakeet Ultra encoder; import parakeet_ultra_encoder_30s_i8.tflite"
             )
         }
     }
@@ -84,10 +87,9 @@ internal object ParakeetUltraModels {
         isUltraName(name) -> null
         "parakeet" in normalizeName(name).lowercase() ->
             "Parakeet v3 and NPU exports are no longer supported. Import a Parakeet Ultra encoder: " +
-                "parakeet_ultra_encoder_30s_i8.tflite (or 10s on slower phones)."
+                "parakeet_ultra_encoder_30s_i8.tflite."
         else ->
-            "Not a Parakeet Ultra model. Import parakeet_ultra_encoder_30s_i8.tflite " +
-                "(or 10s on slower phones)."
+            "Not a Parakeet Ultra model. Import parakeet_ultra_encoder_30s_i8.tflite."
     }
 
     /** A record of the removed Parakeet TDT v3 path (portable CPU or Qualcomm NPU export). */

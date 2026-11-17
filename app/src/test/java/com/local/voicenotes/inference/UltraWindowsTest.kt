@@ -11,17 +11,16 @@ class UltraWindowsTest {
 
     @Test fun windowAndHopLengthsFollowTheModelCard() {
         assertEquals(479_840, UltraWindows.windowSamples(30))
-        assertEquals(320_000, UltraWindows.windowSamples(20))
-        assertEquals(160_000, UltraWindows.windowSamples(10))
         assertEquals(448_000, UltraWindows.hopSamples(30)) // 28 s
-        assertEquals(288_000, UltraWindows.hopSamples(20)) // 18 s
-        assertEquals(128_000, UltraWindows.hopSamples(10)) // 8 s
         assertEquals(480_000, UltraWindows.graphSamples(30))
-        assertThrows(IllegalArgumentException::class.java) { UltraWindows.windowSamples(15) }
+        // Only the 30 s graphs ship; shorter windows are rejected.
+        for (seconds in listOf(10, 15, 20)) {
+            assertThrows(IllegalArgumentException::class.java) { UltraWindows.windowSamples(seconds) }
+        }
     }
 
     @Test fun audioUpToOneWindowIsOnePaddedWindowKeepingEverything() {
-        for ((samples, seconds) in listOf(1 to 30, 100_000 to 30, 479_840 to 30, 160_000 to 10, 5_000 to 10)) {
+        for ((samples, seconds) in listOf(1 to 30, 5_000 to 30, 100_000 to 30, 479_840 to 30)) {
             val plan = UltraWindows.plan(samples, seconds)
             assertEquals(1, plan.size)
             assertEquals(0, plan[0].startSample)
@@ -45,27 +44,6 @@ class UltraWindowsTest {
         assertEquals(
             listOf(Triple(0, 479_840, 0.0 to 28.994999999999997), Triple(448_000, 31_841, 28.995 to Double.POSITIVE_INFINITY)),
             spans(UltraWindows.plan(479_841, 30))
-        )
-        assertEquals(
-            listOf(Triple(0, 160_000, 0.0 to 9.0), Triple(128_000, 32_001, 9.0 to Double.POSITIVE_INFINITY)),
-            spans(UltraWindows.plan(160_001, 10))
-        )
-        assertEquals(
-            listOf(
-                Triple(0, 160_000, 0.0 to 9.0),
-                Triple(128_000, 160_000, 9.0 to 17.0),
-                Triple(256_000, 144_000, 17.0 to Double.POSITIVE_INFINITY)
-            ),
-            spans(UltraWindows.plan(400_000, 10))
-        )
-        assertEquals(
-            listOf(
-                Triple(0, 320_000, 0.0 to 19.0),
-                Triple(288_000, 320_000, 19.0 to 37.0),
-                Triple(576_000, 320_000, 37.0 to 55.0),
-                Triple(864_000, 36_000, 55.0 to Double.POSITIVE_INFINITY)
-            ),
-            spans(UltraWindows.plan(900_000, 20))
         )
     }
 
@@ -113,17 +91,17 @@ class UltraWindowsTest {
     }
 
     @Test fun stitchingUsesTheMiddleOfTheOverlap() {
-        val plan = UltraWindows.plan(400_000, 10) // windows at 0 s, 8 s, 16 s; cuts at 9 s and 17 s
-        // A word at 8.96 s (frame 112 of window 0, frame 12 of window 1) belongs to window 0.
-        assertTrue(plan[0].keeps(112))
+        val plan = UltraWindows.plan(1_000_000, 30) // windows at 0 s, 28 s, 56 s; cuts at 28.995 s and 56.995 s
+        // A word at 28.96 s (frame 362 of window 0, frame 12 of window 1) belongs to window 0.
+        assertTrue(plan[0].keeps(362))
         assertFalse(plan[1].keeps(12))
-        // At 9.04 s it belongs to window 1.
-        assertFalse(plan[0].keeps(113))
+        // At 29.04 s it belongs to window 1.
+        assertFalse(plan[0].keeps(363))
         assertTrue(plan[1].keeps(13))
         val emissions = listOf(
-            listOf(UltraEmission(112, 1), UltraEmission(113, 99)), // 8.96 s kept, 9.04 s dropped
-            listOf(UltraEmission(12, 98), UltraEmission(13, 2), UltraEmission(100, 3), UltraEmission(113, 97)),
-            listOf(UltraEmission(12, 96), UltraEmission(13, 4), UltraEmission(1_000, 5)) // 16.96 s dropped
+            listOf(UltraEmission(362, 1), UltraEmission(363, 99)), // 28.96 s kept, 29.04 s dropped
+            listOf(UltraEmission(12, 98), UltraEmission(13, 2), UltraEmission(100, 3), UltraEmission(363, 97)),
+            listOf(UltraEmission(12, 96), UltraEmission(13, 4), UltraEmission(300, 5)) // 56.96 s dropped
         )
         assertEquals(listOf(1, 2, 3, 4, 5), UltraWindows.stitch(plan, emissions))
     }

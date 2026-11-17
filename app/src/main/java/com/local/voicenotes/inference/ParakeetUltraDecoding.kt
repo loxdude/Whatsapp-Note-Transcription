@@ -113,12 +113,14 @@ internal object UltraWindows {
     const val OVERLAP_SAMPLES = 2 * SAMPLE_RATE
     /** A window under two mel frames has no text (model card); only possible for tiny inputs. */
     const val MIN_WINDOW_SAMPLES = 320
-    val SUPPORTED_SECONDS = listOf(10, 20, 30)
+    /**
+     * Only the 30 s graphs are supported: shorter windows cost more overlap compute and
+     * accuracy for no practical speed gain on the tested phones.
+     */
+    val SUPPORTED_SECONDS = listOf(30)
 
     /** Samples per window of a graph: the 30 s graph uses 479,840 samples (model card). */
     fun windowSamples(seconds: Int): Int = when (seconds) {
-        10 -> 160_000
-        20 -> 320_000
         30 -> 479_840
         else -> throw IllegalArgumentException("Unsupported Parakeet Ultra window: $seconds s")
     }

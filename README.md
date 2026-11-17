@@ -8,7 +8,7 @@ The APK does not include the encoder: tap **Download model** once (665 MB, verif
 
 - Transcribes OGG and Opus voice notes, MP3, M4A, AAC, and WAV files.
 - Decodes Ogg Opus directly with bundled libopus/libopusfile; other formats use Android MediaCodec.
-- Runs Parakeet Ultra (30/20/10 s windows) on the CPU without a network connection.
+- Runs Parakeet Ultra (30 s windows with 2 s overlap) on the CPU without a network connection.
 - Offers `voxtral-mini-latest` as an online alternative.
 - Detects the spoken language automatically (both engines).
 - Keeps the transcript editable and provides a copy button.
@@ -65,51 +65,45 @@ Parakeet Ultra runs on the CPU of any ARM64 Android device; no NPU or GPU is use
 Clone your fork or local copy, then run:
 
 ```bash
-./gradlew assembleDebug
+./gradlew assembleDebug            # or: ./gradlew assembleRelease (minified, ~28 MB)
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
+The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`, the release APK to `app/build/outputs/apk/release/app-release.apk`. Release builds are currently signed with the local debug key, so they install over earlier debug builds without losing data. Prebuilt APKs are on the [releases page](https://github.com/loxdude/Whatsapp-Note-Transcription/releases).
 
 ## Set up local transcription
 
 ### Parakeet Ultra
 
-[Parakeet Ultra](https://huggingface.co/litert-community/parakeet-ultra) is the only on-device model. It runs on the CPU with long windows. Download **one** encoder and copy it to a location that Android's file picker can read:
-
-| File | Size | Use |
-| --- | --- | --- |
-| `parakeet_ultra_encoder_30s_i8.tflite` | 665 MB | Recommended: best accuracy |
-| `parakeet_ultra_encoder_20s_i8.tflite` | 641 MB | In between |
-| `parakeet_ultra_encoder_10s_i8.tflite` | 616 MB | Slower phones and short notes: less padding per window |
+[Parakeet Ultra](https://huggingface.co/litert-community/parakeet-ultra) is the only on-device model. It runs on the CPU with 30 s windows; the only supported encoder is `parakeet_ultra_encoder_30s_i8.tflite` (665 MB). The 10 s and 20 s exports are not supported: shorter windows were less accurate in our measurements (table below), and the compute saved did not justify shipping two more mel graphs. 10/20 s encoders imported with older versions stay listed but disabled with a pointer to the 30 s encoder.
 
 In the app:
 
 **One tap:** with Local selected, tap `Download model` on the main screen (or in settings). The app downloads `parakeet_ultra_encoder_30s_i8.tflite` from litert-community/parakeet-ultra into app-private storage (`no_backup/models`), resumes after cancellation or network errors, checks the exact size and the pinned SHA-256 (`706675fd…e5cd`) before installing it, and selects it. On a metered connection it asks first. A foreground notification keeps the download running in the background. `Remove download` in settings frees the space again.
 
-**Manual import** (e.g. the 10 s encoder):
+**Manual import** (if you already have the file):
 
 1. Open the settings sheet.
 2. Tap `Import .tflite file instead` and select the encoder.
 3. Select an audio file and tap `Transcribe`.
 
-The importer checks the filename and the TFLite header; the model is referenced through Android's Storage Access Framework, not copied into the APK. Files that are not part of the Parakeet Ultra family (for example Parakeet TDT v3 or NPU exports) are rejected with an error that names the Ultra encoder to import. The window length comes from the filename; browser suffixes such as ` (1)` are accepted. The settings list shows it as `Parakeet Ultra · CPU · 30 s windows`, and the main screen as `On-device model: Parakeet Ultra`. The `f16` encoders are listed but disabled: they are meant for GPU/NPU, which the app does not support for Ultra yet. Do not import the mel or decoder files; the app bundles them.
+The importer checks the filename and the TFLite header; the model is referenced through Android's Storage Access Framework, not copied into the APK. Files that are not part of the Parakeet Ultra family (for example Parakeet TDT v3 or NPU exports) are rejected with an error that names the Ultra encoder to import. Browser suffixes such as ` (1)` are accepted. The settings list shows it as `Parakeet Ultra · CPU · 30 s windows`, and the main screen as `On-device model: Parakeet Ultra`. The `f16` encoders are listed but disabled: they are meant for GPU/NPU, which the app does not support for Ultra yet. Do not import the mel or decoder files; the app bundles them.
 
 How the app runs it (a port of the model card's pipeline):
 
-- Audio up to one window (30 s: 479,840 samples; 20 s: 320,000; 10 s: 160,000) is one zero-padded window. Longer audio is cut into overlapping windows with a hop of window − 2 s (30 s → 28 s, 10 s → 8 s). Each token is kept only by the window whose own region contains its time; the regions meet in the middle of each overlap (the first window keeps from 0, the last up to the end). This avoids the split or repeated words of fixed cuts.
+- Audio up to one window (30 s: 479,840 samples) is one zero-padded window. Longer audio is cut into overlapping 30 s windows every 28 s (2 s overlap). Each token is kept only by the window whose own region contains its time; the regions meet in the middle of each overlap (the first window keeps from 0, the last up to the end). This avoids the split or repeated words of fixed cuts.
 - Each window: bundled mel graph → imported encoder → greedy TDT decoding with the bundled int8 decoder, starting from blank with zero state (token 3 ends the window, ten symbols per frame at most, 3,750 steps at most).
 - Everything runs on the CPU (XNNPACK): encoder 4 threads, mel 2, decoder 1. Only one encoder is loaded at a time.
 - The encoder is used from a verified private copy: the first preparation copies it (about 0.6 GB) into app-private storage; later starts reuse the verified copy.
 - The bundled graphs are loaded straight from the APK (stored uncompressed). If LiteRT cannot load an asset, the app extracts it once to `noBackupFilesDir/bundled-models`, checks size and SHA-256, and loads it from there.
 
-Measured on a Galaxy Note10+ (Exynos 9825, `benchmark_model`, 4 threads): one encoder call takes 0.68 s for a 10 s window and 2.28 s for a 30 s window (the v3 5 s encoder: about 0.69 s).
+Measured on a Galaxy Note10+ (Exynos 9825, `benchmark_model`, 4 threads): one 30 s encoder call takes 2.28 s, a 10 s call 0.68 s. With the 2 s overlap that is about 0.081 s of compute per second of new audio for 30 s windows (28 s hop) versus 0.085 s for 10 s windows (8 s hop): the short window saves nothing on long notes and is less accurate.
 
 ### Why Parakeet TDT v3 and the NPU path were removed
 
 Earlier versions also ran Parakeet TDT 0.6B v3 (stateful 5 s exports) on the CPU and on Qualcomm NPUs through QNN. On the three test phones (OnePlus 12 / SM8650, Galaxy Z Fold 4 / SM8475, Galaxy Note10+ / Exynos 9825) Parakeet Ultra i8 on the CPU was both more accurate (table below) and faster than v3. The only advantage of v3, NPU exports, did not pay off: on the OnePlus 12 the v3 i8 CPU model already beat its own NPU export, and the SM8450 export returned blank text on the Fold 4. Removing v3 and QNN dropped the QNN runtime and the Qualcomm dispatch library and shrank the debug APK from 136.5 MB to 63.1 MB.
 
-Models imported with an older version stay in the model list, disabled, with the note "Parakeet v3 was replaced by Parakeet Ultra — import parakeet_ultra_encoder_30s_i8.tflite (or 10s on slower phones)". If one of them was selected, nothing is selected (the cloud model is never chosen automatically). Their private copies in app storage are released at the next app start.
+Models imported with an older version stay in the model list, disabled, with the note "Parakeet v3 was replaced by Parakeet Ultra — download the model or import parakeet_ultra_encoder_30s_i8.tflite". If one of them was selected, nothing is selected (the cloud model is never chosen automatically). Their private copies in app storage are released at the next app start.
 
 ### Accuracy on WhatsApp voice notes
 
@@ -120,7 +114,7 @@ Word error rate on 29 real German WhatsApp voice notes (23 minutes), measured wi
 | Parakeet TDT v3, 5 s chunks, decoder state carried across chunks (original) | 30.9% |
 | Parakeet TDT v3, 5 s chunks, fresh decoder state per chunk (last v3 version) | 18.1% |
 | Parakeet Ultra i8, 10 s windows, no overlap | 13.4% |
-| Parakeet Ultra i8, 10 s windows, hop 8 s (app setting) | 12.2% |
+| Parakeet Ultra i8, 10 s windows, hop 8 s | 12.2% |
 | Parakeet Ultra i8, 30 s windows, no overlap | 10.7% |
 | Parakeet Ultra i8, 30 s windows, hop 25 s | 10.4% |
 
@@ -198,7 +192,7 @@ app/src/main/java/com/local/voicenotes/
     └── ParakeetUltraModels.kt      Ultra encoder filename rules
 ```
 
-`app/src/main/assets/parakeet_vocab.bin` contains the 8192-piece tokenizer vocabulary (identical to the Parakeet TDT v3 vocabulary it was extracted from). `app/src/main/assets/parakeet_ultra_mel_{10,20,30}s.tflite` and `parakeet_ultra_decoder_i8.tflite` are the bundled Parakeet Ultra graphs. Encoders stay outside the repository and APK.
+`app/src/main/assets/parakeet_vocab.bin` contains the 8192-piece tokenizer vocabulary (identical to the Parakeet TDT v3 vocabulary it was extracted from). `app/src/main/assets/parakeet_ultra_mel_30s.tflite` and `parakeet_ultra_decoder_i8.tflite` are the bundled Parakeet Ultra graphs. Encoders stay outside the repository and APK.
 
 ## Main dependencies
 
@@ -221,4 +215,4 @@ LiteRT uses Apache License 2.0.
 
 The bundled `libvoicenotes_opus.so` links libopus 1.5.2, libogg 1.3.5 and opusfile 0.12 (BSD-style licenses). Their complete notices ship in `app/src/main/assets/licenses/`. The JNI wrapper and reproducible, checksum-pinned build script are in `native/`; normal Gradle builds use the prebuilt arm64 library and do not need an NDK.
 
-The bundled Parakeet Ultra files (`parakeet_ultra_mel_10s.tflite`, `parakeet_ultra_mel_20s.tflite`, `parakeet_ultra_mel_30s.tflite`, `parakeet_ultra_decoder_i8.tflite`) are unmodified copies from [litert-community/parakeet-ultra](https://huggingface.co/litert-community/parakeet-ultra), licensed under [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/). They are converted from [moondream/parakeet-ultra](https://huggingface.co/moondream/parakeet-ultra), which is based on NVIDIA's [parakeet-tdt-0.6b-v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) (CC-BY-4.0). The settings sheet shows the same attribution.
+The bundled Parakeet Ultra files (`parakeet_ultra_mel_30s.tflite`, `parakeet_ultra_decoder_i8.tflite`) are unmodified copies from [litert-community/parakeet-ultra](https://huggingface.co/litert-community/parakeet-ultra), licensed under [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/). They are converted from [moondream/parakeet-ultra](https://huggingface.co/moondream/parakeet-ultra), which is based on NVIDIA's [parakeet-tdt-0.6b-v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) (CC-BY-4.0). The settings sheet shows the same attribution.

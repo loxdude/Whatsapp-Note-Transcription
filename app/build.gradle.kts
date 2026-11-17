@@ -15,8 +15,8 @@ android {
         applicationId = "com.local.voicenotes.litert"
         minSdk = 31
         targetSdk = 35
-        versionCode = 6
-        versionName = "0.5.0-litert"
+        versionCode = 7
+        versionName = "0.6.0"
         ndk { abiFilters += "arm64-v8a" }
 
         testInstrumentationRunner = "com.local.voicenotes.audio.AudioDecoderChecks"
@@ -34,6 +34,9 @@ android {
 
     buildTypes {
         release {
+            // No separate release key yet: signed with the debug key so it upgrades the
+            // debug builds already installed (a new key would force an uninstall and data loss).
+            signingConfig = signingConfigs.getByName("debug")
             isMinifyEnabled = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
@@ -43,6 +46,12 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+}
+
+// Stack-trace mapping for Compose groups only aids debugging of minified builds; its extra
+// tool is not needed to ship.
+composeCompiler {
+    includeComposeMappingFile.set(false)
 }
 
 kotlin {
@@ -69,9 +78,10 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-tooling")
 
     testImplementation("junit:junit:4.13.2")
-    // Match versions pulled into the debug app by ui-tooling (also permits offline test builds).
-    androidTestImplementation("androidx.compose.foundation:foundation:1.9.0")
-    androidTestImplementation("androidx.compose.animation:animation:1.9.0")
+    // The debug app already resolves these versions via ui-tooling; pin them for every variant so
+    // release ships exactly what debug was tested with (and builds from the same offline cache).
+    implementation("androidx.compose.foundation:foundation:1.9.0")
+    implementation("androidx.compose.animation:animation:1.9.0")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
 }
 

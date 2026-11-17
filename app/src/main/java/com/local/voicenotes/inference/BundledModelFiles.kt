@@ -19,14 +19,6 @@ internal object ParakeetUltraBundle {
         "0b54e2c39831519f81b3cc323c443fcd88f358d61f7c7285005f85371c18d1a0"
     )
     private val mels = mapOf(
-        10 to BundledModel(
-            "parakeet_ultra_mel_10s.tflite", 1_608_068L,
-            "89cdd51d80f1fb829584b6d8d24e188a8f0c880b1aefae070245b71dc8977ccd"
-        ),
-        20 to BundledModel(
-            "parakeet_ultra_mel_20s.tflite", 2_252_068L,
-            "7684c1444fd4d1dfd6bf51c33d9548312fd2322ead7bcfd269ee3218f45ba28a"
-        ),
         30 to BundledModel(
             "parakeet_ultra_mel_30s.tflite", 2_896_076L,
             "7deaca292363096375bcf1a64904dd1891ca9409ddba2e067a88e121803f10cc"

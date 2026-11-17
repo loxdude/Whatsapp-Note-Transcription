@@ -59,11 +59,13 @@ class ModelRecordsTest {
 
     @Test fun enabledIsReEvaluatedOnEveryRead() {
         // A persisted enabled=false is not trusted for a usable encoder, and vice versa.
-        val refreshed = ModelRecords.refresh(record("a", name = "parakeet_ultra_encoder_20s_i8.tflite", enabled = false))
+        val refreshed = ModelRecords.refresh(record("a", name = "parakeet_ultra_encoder_30s_i8.tflite", enabled = false))
         assertTrue(refreshed.enabled)
         assertEquals("parakeet-ultra", refreshed.architecture)
         assertEquals("litert-ultra-cpu", refreshed.backend)
-        assertEquals("Parakeet Ultra · CPU · 20 s windows", refreshed.note)
+        assertEquals("Parakeet Ultra · CPU · 30 s windows", refreshed.note)
+        // A 20 s encoder imported by an older version is no longer usable.
+        assertFalse(ModelRecords.refresh(record("c", name = "parakeet_ultra_encoder_20s_i8.tflite")).enabled)
         val disabled = ModelRecords.refresh(record("b", name = "parakeet_ultra_encoder_20s_f16.tflite"))
         assertFalse(disabled.enabled)
         assertEquals(ParakeetUltraModels.F16_NOTE, disabled.note)
@@ -84,7 +86,6 @@ class ModelRecordsTest {
             assertFalse(stored.id, refreshed.enabled)
             assertEquals(stored.id, ParakeetUltraModels.V3_REPLACED_NOTE, refreshed.note)
             assertTrue(refreshed.note.contains("parakeet_ultra_encoder_30s_i8.tflite"))
-            assertTrue(refreshed.note.contains("10s on slower phones"))
             // Identity and source are kept, so the record does not silently disappear.
             assertEquals(stored.copy(enabled = false, note = refreshed.note), refreshed)
         }

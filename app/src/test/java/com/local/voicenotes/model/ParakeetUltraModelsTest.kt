@@ -9,18 +9,16 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ParakeetUltraModelsTest {
-    @Test fun i8EncodersAreEnabledOnTheUltraCpuBackendWithTheirWindow() {
-        for (seconds in listOf(10, 20, 30)) {
-            val name = "parakeet_ultra_encoder_${seconds}s_i8.tflite"
-            val evaluation = ParakeetUltraModels.evaluate(name)
-            assertTrue(name, evaluation.enabled)
-            assertEquals("litert-ultra-cpu", evaluation.backend)
-            assertEquals("parakeet-ultra", evaluation.architecture)
-            assertEquals("Parakeet Ultra · CPU · $seconds s windows", evaluation.note)
-            assertEquals(ParakeetUltraModels.Encoder(seconds, "i8"), ParakeetUltraModels.parseEncoder(name))
-            assertTrue(ParakeetUltraModels.isLocalBackend(evaluation.backend))
-            assertNull(ParakeetUltraModels.importError(name))
-        }
+    @Test fun only30sI8EncoderIsEnabledOnTheUltraCpuBackend() {
+        val name = "parakeet_ultra_encoder_30s_i8.tflite"
+        val evaluation = ParakeetUltraModels.evaluate(name)
+        assertTrue(name, evaluation.enabled)
+        assertEquals("litert-ultra-cpu", evaluation.backend)
+        assertEquals("parakeet-ultra", evaluation.architecture)
+        assertEquals("Parakeet Ultra · CPU · 30 s windows", evaluation.note)
+        assertEquals(ParakeetUltraModels.Encoder(30, "i8"), ParakeetUltraModels.parseEncoder(name))
+        assertTrue(ParakeetUltraModels.isLocalBackend(evaluation.backend))
+        assertNull(ParakeetUltraModels.importError(name))
     }
 
     @Test fun f16EncodersAreShownButDisabled() {
@@ -42,7 +40,11 @@ class ParakeetUltraModelsTest {
             assertTrue(name, ParakeetUltraModels.evaluate(name).enabled)
             assertEquals("litert-ultra-cpu", ParakeetUltraModels.evaluate(name).backend)
         }
-        assertEquals(10, ParakeetUltraModels.parseEncoder("parakeet_ultra_encoder_10s_i8 (3).tflite")!!.windowSeconds)
+        // 10/20 s encoders are still recognized, but only listed disabled with a pointer to 30 s.
+        for (name in listOf("parakeet_ultra_encoder_10s_i8 (3).tflite", "parakeet_ultra_encoder_20s_i8.tflite")) {
+            assertFalse(name, ParakeetUltraModels.evaluate(name).enabled)
+            assertEquals(ParakeetUltraModels.SHORT_WINDOW_NOTE, ParakeetUltraModels.evaluate(name).note)
+        }
     }
 
     @Test fun otherUltraFilesAreRecognizedButDisabled() {
