@@ -17,6 +17,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -115,7 +117,7 @@ private class OpenVoiceNoteFolder : ActivityResultContracts.OpenDocumentTree() {
 
 private val AUDIO_TYPES = arrayOf("audio/*", "application/octet-stream")
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun MainScreen(
     state: AppUiState,
@@ -183,6 +185,7 @@ fun MainScreen(
     }
 
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
+    val imeVisible = WindowInsets.isImeVisible
     Scaffold(
         modifier = Modifier.fillMaxSize().nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
@@ -204,7 +207,9 @@ fun MainScreen(
             )
         },
         bottomBar = {
-            ActionBar(state, engine, onTranscribe = ::transcribe, onCancel = viewModel::cancel)
+            // The keyboard would cover the bar while Scaffold still reserved its height, leaving a
+            // device-dependent gap above the keyboard: hide it while typing.
+            if (!imeVisible) ActionBar(state, engine, onTranscribe = ::transcribe, onCancel = viewModel::cancel)
         },
         snackbarHost = { SnackbarHost(snackbar) },
         containerColor = MaterialTheme.colorScheme.surface
