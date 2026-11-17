@@ -129,11 +129,11 @@ class AppGraph(private val app: VoiceNotesApplication) {
         startService = { startWorkService() },
         autoStart = { sharedAutoStart(app.isInForeground, workServiceInForeground) }
     )
-    val consentPrompt = sharedWork.consentPrompt
     val shareHint = sharedWork.shareHint
 
     fun onSharedAudio(uri: Uri) = sharedWork.onSharedAudio(uri.toString())
-    fun transcribe(): Boolean = sharedWork.transcribe()
+    fun transcribe(audioUri: String? = null, modelId: String? = null): Boolean =
+        sharedWork.transcribe(audioUri = audioUri, modelId = modelId)
     /** Single process-owned cancellation authority for UI and notification actions. */
     fun cancelWork() = sharedWork.cancelWork()
 
@@ -142,10 +142,10 @@ class AppGraph(private val app: VoiceNotesApplication) {
         cancelWork()
         cancelModelDownload()
     }
-    fun consentPromptShown() = sharedWork.consentPromptShown()
-    fun grantCloudUploadConsent() {
-        consentPreferences.edit().putBoolean("cloud_upload_consent", true).apply()
-        mutableCloudConsent.value = true
+    /** Remembered until revoked in Settings; the consent dialog says so. */
+    fun setCloudUploadConsent(granted: Boolean) {
+        consentPreferences.edit().putBoolean("cloud_upload_consent", granted).apply()
+        mutableCloudConsent.value = granted
     }
 
     init {

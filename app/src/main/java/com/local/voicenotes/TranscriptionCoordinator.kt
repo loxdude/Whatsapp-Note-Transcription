@@ -153,6 +153,12 @@ class TranscriptionCoordinator(
     // All fields below are guarded by [lock].
     private var generation = 0L
     private var modelsVersion = 0L
+    /**
+     * The latest explicit selection made in this process (NO_SELECTION after clearSelection),
+     * or null if none. It is persisted asynchronously, so a refresh must prefer it over the
+     * catalog's value, which may predate it and would otherwise restore an older choice.
+     */
+    private var explicitSelection: String? = null
     private var foreground: Job? = null
     private var foregroundKind: Kind? = null
     private var foregroundToken = 0L
@@ -234,6 +240,7 @@ class TranscriptionCoordinator(
             if (disposed || foregroundRunning()) return false
             val model = mutableState.value.models.firstOrNull { it.id == id && it.enabled } ?: return false
             val select = { state: AppUiState -> state.copy(selectedModelId = id) }
+            explicitSelection = id
             prepareLocked(model, select) ?: run { write(select); null }
         }
         persistSelection(id)
@@ -251,6 +258,7 @@ class TranscriptionCoordinator(
             if (disposed || foregroundRunning()) return false
             val pending = prepareJob?.takeIf { it.isActive }
             if (pending != null) generation++
+            explicitSelection = NO_SELECTION
             write {
                 it.copy(
                     selectedModelId = null,
@@ -276,12 +284,17 @@ class TranscriptionCoordinator(
 
     private suspend fun runRefresh(startVersion: Long, startGeneration: Long) {
         val loaded = runCatchingCancellable { catalog.models() to catalog.selectedModelId() }
-        val (models, saved) = loaded.getOrElse { error ->
+        val (models, persisted) = loaded.getOrElse { error ->
             log("Model list refresh failed: ${error.message}")
             return
         }
         val toPrepare = locked {
             if (disposed) return
+            // The catalog may not have persisted a selection change made during this refresh
+            // (e.g. Local chosen without a local model clears a cloud selection): that older
+            // choice must not come back. NO_SELECTION matches no id, so only a local model
+            // may then fill the missing selection.
+            val saved = explicitSelection ?: persisted
             // A newer list (import, reconcile, later refresh) is already published: this
             // snapshot is stale and must neither replace the list nor an existing selection.
             // It may only fill in a missing selection from the *current* list.
@@ -352,7 +365,10 @@ class TranscriptionCoordinator(
                 val selected = if (entry.enabled) entry.id else chooseSelection(models, current, saved = null)
                 modelsVersion++
                 val publish = { state: AppUiState -> state.copy(models = models, selectedModelId = selected) }
-                if (entry.enabled) preparation = prepareLocked(entry, publish)
+                if (entry.enabled) {
+                    explicitSelection = entry.id
+                    preparation = prepareLocked(entry, publish)
+                }
                 if (preparation == null) write {
                     publish(it).copy(
                         progress = if (entry.enabled) TranscriptionProgress.Idle
@@ -442,11 +458,18 @@ class TranscriptionCoordinator(
 
     // ---- Transcription ----------------------------------------------------------------
 
-    fun transcribe(): Boolean {
+    /**
+     * Starts a transcription of the current audio with the selected model. A non-null
+     * [audioUri] or [modelId] binds the start to what the user confirmed: if the audio or the
+     * model changed meanwhile, nothing starts.
+     */
+    fun transcribe(audioUri: String? = null, modelId: String? = null): Boolean {
         val job = locked {
             if (disposed || foregroundRunning()) return false
             val snapshot = mutableState.value
             if (!snapshot.canTranscribe) return false
+            if (audioUri != null && audioUri != snapshot.audioUri) return false
+            if (modelId != null && modelId != snapshot.selectedModelId) return false
             val audio = snapshot.audioUri ?: return false
             val model = snapshot.selectedModel ?: return false
             val token = ++generation

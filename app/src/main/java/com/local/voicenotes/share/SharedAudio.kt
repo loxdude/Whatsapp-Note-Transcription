@@ -12,8 +12,11 @@ enum class SharedAudioDecision {
     ABORT,
     /** Keep the audio loaded; the main screen shows the no-model hint. */
     NO_USABLE_MODEL,
-    /** A cloud model is selected and the user has not agreed to uploads: ask first. */
-    NEEDS_CONSENT,
+    /**
+     * A cloud model is selected: only keep the audio loaded. A share never starts an upload by
+     * itself (the sender may not even hold a grant for the URI); the user taps Transcribe.
+     */
+    CLOUD_NEEDS_TAP,
     TRANSCRIBE
 }
 
@@ -49,9 +52,9 @@ fun isShareableAudioType(mimeType: String?): Boolean {
 /**
  * Decides whether shared audio should be transcribed automatically. Must only be called once
  * the model list was loaded (otherwise "no model" is reported prematurely). Never returns
- * [SharedAudioDecision.TRANSCRIBE] for a cloud model without [cloudConsent].
+ * [SharedAudioDecision.TRANSCRIBE] for a cloud model, even with upload consent.
  */
-fun decideSharedAudio(state: AppUiState, sharedUri: String, cloudConsent: Boolean): SharedAudioDecision {
+fun decideSharedAudio(state: AppUiState, sharedUri: String): SharedAudioDecision {
     if (state.audioUri != sharedUri) return SharedAudioDecision.ABORT
     when (state.progress) {
         TranscriptionProgress.Preparing, is TranscriptionProgress.Decoding,
@@ -65,6 +68,6 @@ fun decideSharedAudio(state: AppUiState, sharedUri: String, cloudConsent: Boolea
     if (state.busy) return SharedAudioDecision.WAIT
     val model = state.selectedModel
     if (model == null || !model.enabled) return SharedAudioDecision.NO_USABLE_MODEL
-    if (model.isCloud() && !cloudConsent) return SharedAudioDecision.NEEDS_CONSENT
+    if (model.isCloud()) return SharedAudioDecision.CLOUD_NEEDS_TAP
     return SharedAudioDecision.TRANSCRIBE
 }

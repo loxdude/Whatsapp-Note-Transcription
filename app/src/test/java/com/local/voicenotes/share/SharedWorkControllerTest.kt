@@ -172,7 +172,7 @@ class SharedWorkControllerTest {
             assertFalse(f.work.transcribe())
             f.work.onSharedAudio("content://shared").join()
             settle()
-            assertTrue(f.work.consentPrompt.value)
+            assertNotNull(f.work.shareHint.value)
             assertEquals(0, f.backend.validations.get())
             assertEquals(0, f.backend.uploads.get())
             assertEquals(0, f.backend.transcribeCalls.get())
@@ -182,21 +182,6 @@ class SharedWorkControllerTest {
         } finally { f.close() }
     }
 
-    @Test fun actualShareStartRechecksConsentAfterDecision() = runBlocking {
-        val f = Fixture(this, cloud = true)
-        try {
-            f.ready()
-            f.consent = true
-            // Decision permits transcription; revoke before the actual shared/direct start gate.
-            f.beforeAutoStart = { f.consent = false }
-            f.work.onSharedAudio("content://shared").join()
-            settle()
-            assertEquals(0, f.backend.validations.get())
-            assertEquals(0, f.backend.uploads.get())
-            assertEquals(0, f.serviceStarts)
-            assertEquals(0, f.reservations)
-        } finally { f.close() }
-    }
 
     @Test fun explicitConsentAllowsOneUploadFromDirectStartAndRejectsConcurrentTap() = runBlocking {
         val f = Fixture(this, cloud = true)
@@ -213,28 +198,30 @@ class SharedWorkControllerTest {
         } finally { f.close() }
     }
 
-    @Test fun explicitConsentAllowsOneSharedUploadWithContinuousServiceHandoff() = runBlocking {
-        val f = Fixture(this, cloud = true)
-        val upload = Gate()
-        try {
-            f.ready()
-            f.consent = true
-            f.mode = SharedAutoStart.START_IN_RUNNING_SERVICE
-            f.cloudUpload = { source -> upload.nonCancellable { "uploaded $source" } }
-            var busyAtRelease = false
-            f.onRelease = { busyAtRelease = f.coordinator.state.value.busy }
-            val share = f.work.onSharedAudio("content://shared")
-            upload.started.await()
-            share.join()
-            assertTrue("publish busy before releasing reservation", busyAtRelease)
-            assertEquals(0, f.reservations)
-            assertEquals(1, f.releases.get())
-            assertEquals(0, f.serviceStarts)
-            upload.release.complete(Unit)
-            withTimeout(5_000) { f.coordinator.state.first { it.progress is TranscriptionProgress.Completed } }
-            assertEquals(1, f.backend.uploads.get())
-            assertEquals(1, f.backend.validations.get())
-        } finally { upload.release.complete(Unit); f.close() }
+    /** A share (exported activity, any sender) must never upload by itself, even with consent. */
+    @Test fun sharedAudioNeverStartsCloudUploadEvenWithConsent() = runBlocking {
+        for (mode in SharedAutoStart.entries) {
+            val f = Fixture(this, cloud = true)
+            try {
+                f.ready()
+                f.consent = true
+                f.mode = mode
+                f.work.onSharedAudio("content://shared").join()
+                settle()
+                assertEquals("content://shared", f.coordinator.state.value.audioUri)
+                assertEquals(TranscriptionProgress.Idle, f.coordinator.state.value.progress)
+                assertTrue(f.work.shareHint.value!!.contains("Mistral"))
+                assertEquals(0, f.backend.validations.get())
+                assertEquals(0, f.backend.uploads.get())
+                assertEquals(0, f.serviceStarts)
+                assertEquals(0, f.reservations)
+                // The user's tap uploads exactly this audio.
+                assertTrue(f.work.transcribe(audioUri = "content://shared"))
+                withTimeout(5_000) { f.coordinator.state.first { it.progress is TranscriptionProgress.Completed } }
+                assertEquals(1, f.backend.uploads.get())
+                assertNull(f.work.shareHint.value)
+            } finally { f.close() }
+        }
     }
 
     @Test fun cloudIsNeverAnAutomaticFallbackEvenWithConsent() = runBlocking {
@@ -330,22 +317,18 @@ class SharedWorkControllerTest {
         } finally { transcribe.release.complete(Unit); f.close() }
     }
 
-    @Test fun grantingConsentAfterSharedPromptStartsExactlyOneUpload() = runBlocking {
+    /** A consent confirmation is bound to the audio it was shown for. */
+    @Test fun boundStartRefusesWhenAudioChangedSinceConfirmation() = runBlocking {
         val f = Fixture(this, cloud = true)
         try {
             f.ready()
-            f.work.onSharedAudio("content://shared").join()
-            assertTrue(f.work.consentPrompt.value)
-            assertEquals(0, f.backend.uploads.get())
-            f.work.consentPromptShown()
             f.consent = true
-            assertTrue(f.work.transcribe())
-            assertFalse(f.work.transcribe())
-            withTimeout(5_000) { f.coordinator.state.first { it.progress is TranscriptionProgress.Completed } }
-            assertFalse(f.work.consentPrompt.value)
-            assertEquals(1, f.backend.uploads.get())
-            assertEquals(1, f.backend.validations.get())
-            assertEquals(1, f.releases.get())
+            f.work.setAudio("content://newer", persist = true).join()
+            assertFalse(f.work.transcribe(audioUri = "content://picked"))
+            assertFalse(f.work.transcribe(audioUri = "content://newer", modelId = "other"))
+            settle()
+            assertEquals(0, f.backend.uploads.get())
+            assertEquals(0, f.serviceStarts)
         } finally { f.close() }
     }
 
@@ -374,8 +357,6 @@ class SharedWorkControllerTest {
         val models = listOf(if (cloud) MODEL_CLOUD else MODEL_A)
         var savedSelection: String? = models.single().id
         val decodedSources = mutableListOf<String>()
-        var beforeAutoStart: () -> Unit = {}
-        var onRelease: () -> Unit = {}
         var cloudUpload: suspend (String) -> String
             get() = (backend as CountingCloudBackend).upload
             set(value) { (backend as CountingCloudBackend).upload = value }
@@ -406,11 +387,11 @@ class SharedWorkControllerTest {
             reserveService = {
                 reservations++
                 // Deliberately not idempotent: the controller must release each lease exactly once.
-                val release: () -> Unit = { releases.incrementAndGet(); reservations--; onRelease() }
+                val release: () -> Unit = { releases.incrementAndGet(); reservations-- }
                 release
             },
             startService = { serviceStarts++ },
-            autoStart = { beforeAutoStart(); mode }
+            autoStart = { mode }
         )
         suspend fun ready() {
             refresh = coordinator.refreshModels()

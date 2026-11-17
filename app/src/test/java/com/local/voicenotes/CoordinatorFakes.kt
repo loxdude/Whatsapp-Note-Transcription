@@ -77,9 +77,14 @@ internal class FakeCatalog(initial: List<ImportedModel>) : ModelCatalog {
     @Volatile var saved: String? = null
     val selections = CopyOnWriteArrayList<String>()
     @Volatile var selectGate: CompletableDeferred<Unit>? = null
+    /** Runs at the start of every models() read; tests block a refresh here. */
+    @Volatile var onModels: suspend () -> Unit = {}
     @Volatile var onImport: suspend (String, (Float) -> Unit) -> ImportedModel = { _, _ -> error("unexpected import") }
 
-    override suspend fun models(): List<ImportedModel> = stored.toList()
+    override suspend fun models(): List<ImportedModel> {
+        onModels()
+        return stored.toList()
+    }
     override suspend fun selectedModelId(): String? = saved
     override suspend fun select(id: String) {
         selectGate?.await()

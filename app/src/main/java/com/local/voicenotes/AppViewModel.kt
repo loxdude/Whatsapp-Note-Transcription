@@ -40,7 +40,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Process-owned share state also survives ViewModel/Activity recreation. */
     val cloudUploadConsent = graph.cloudUploadConsent
-    val consentPrompt = graph.consentPrompt
     val shareHint = graph.shareHint
 
     val modelDownload: StateFlow<DownloadState> = graph.modelDownload
@@ -143,8 +142,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         graph.onSharedAudio(uri)
     }
 
-    fun consentPromptShown() = graph.consentPromptShown()
-    fun grantCloudUploadConsent() = graph.grantCloudUploadConsent()
+    fun grantCloudUploadConsent() = graph.setCloudUploadConsent(true)
+    fun revokeCloudUploadConsent() = graph.setCloudUploadConsent(false)
 
     fun setLanguage(language: LanguageOption) = coordinator.setLanguage(language)
 
@@ -156,8 +155,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         if (coordinator.importModel(uri.toString())) graph.startWorkService()
     }
 
-    /** Cloud consent is enforced by the app-scoped start path. */
-    fun transcribe(): Boolean = graph.transcribe()
+    /**
+     * Cloud consent is enforced by the app-scoped start path. Non-null [audioUri]/[modelId]
+     * bind the start to what the user confirmed; nothing starts if either changed.
+     */
+    fun transcribe(audioUri: String? = null, modelId: String? = null): Boolean = graph.transcribe(audioUri, modelId)
 
     fun cancel() = graph.cancelWork()
 

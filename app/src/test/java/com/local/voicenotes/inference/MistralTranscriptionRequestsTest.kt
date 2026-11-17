@@ -1,7 +1,12 @@
 package com.local.voicenotes.inference
 
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Rule
@@ -10,6 +15,7 @@ import org.junit.rules.TemporaryFolder
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.cancellation.CancellationException
 
 class MistralTranscriptionRequestsTest {
@@ -148,6 +154,54 @@ class MistralTranscriptionRequestsTest {
         })
         assertEquals(1, executions)
         assertTrue(tmp.root.listFiles()!!.isEmpty())
+    }
+
+    /** Cancel, then Transcribe again while the old request is still unwinding (blocked I/O). */
+    @Test fun restartWaitsForCancelledPredecessorInsteadOfFailing() {
+        val requests = MistralTranscriptionRequests()
+        val enteredKeyRead = CountDownLatch(1)
+        val releaseKeyRead = CountDownLatch(1)
+        val oldExecutions = AtomicInteger()
+        val pool = Executors.newSingleThreadExecutor()
+        try {
+            val old = pool.submit<Boolean> {
+                runBlocking {
+                    try {
+                        requests.run(
+                            readKey = {
+                                enteredKeyRead.countDown()
+                                check(releaseKeyRead.await(5, TimeUnit.SECONDS))
+                                "synthetic-key"
+                            },
+                            stage = { MistralPcmStaging.stage(tmp.root, FloatArray(16), it) },
+                            send = { _, _, _ -> oldExecutions.incrementAndGet(); "old" }
+                        )
+                        false
+                    } catch (_: CancellationException) { true }
+                }
+            }
+            assertTrue(enteredKeyRead.await(5, TimeUnit.SECONDS))
+            val next = runBlocking {
+                val next = async(Dispatchers.Default) {
+                    requests.run(
+                        readKey = { "synthetic-key" },
+                        stage = { MistralPcmStaging.stage(tmp.root, FloatArray(16), it) },
+                        send = { _, _, _ -> "next" }
+                    )
+                }
+                delay(100)
+                assertFalse("must wait for the old request, neither fail nor overlap", next.isCompleted)
+                releaseKeyRead.countDown()
+                withTimeout(5_000) { next.await() }
+            }
+            assertEquals("next", next)
+            assertTrue("the new request cancels its predecessor", old.get(5, TimeUnit.SECONDS))
+            assertEquals(0, oldExecutions.get())
+            assertTrue(tmp.root.listFiles()!!.isEmpty())
+        } finally {
+            releaseKeyRead.countDown()
+            pool.shutdownNow()
+        }
     }
 
     @Test fun cancelDuringUninterruptibleKeyReadNeverStagesOrExecutesAndNextRequestWorks() {

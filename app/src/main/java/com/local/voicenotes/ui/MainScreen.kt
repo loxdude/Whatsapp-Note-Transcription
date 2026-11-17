@@ -124,12 +124,19 @@ fun MainScreen(
     historyError: String?,
     onWorkStarted: () -> Unit
 ) {
+    // A tap while the model is still being prepared starts the transcription right after,
+    // but only for the same audio and model, and not after a cancel or failure.
+    var pendingStart by rememberSaveable { mutableStateOf<PendingStart?>(null) }
+    fun pickAudio(uri: android.net.Uri) {
+        pendingStart = null
+        viewModel.setAudio(uri)
+    }
     // "Files" starts at the top of the internal storage (/storage/emulated/0).
     val audioPicker = rememberLauncherForActivityResult(OpenDocumentAt { VoiceNoteFolders.primaryRoot }) { uri ->
-        uri?.let(viewModel::setAudio)
+        uri?.let(::pickAudio)
     }
     val whatsAppSystemPicker = rememberLauncherForActivityResult(OpenDocumentAt { VoiceNoteFolders.whatsAppVoiceNotes }) { uri ->
-        uri?.let(viewModel::setAudio)
+        uri?.let(::pickAudio)
     }
     var showVoiceNotes by rememberSaveable { mutableStateOf(false) }
     val voiceNoteTree by viewModel.voiceNoteTree.collectAsStateWithLifecycle()
@@ -142,45 +149,52 @@ fun MainScreen(
     val download by viewModel.modelDownload.collectAsStateWithLifecycle()
     val keyStatus by viewModel.keyStatus.collectAsStateWithLifecycle()
     val cloudConsent by viewModel.cloudUploadConsent.collectAsStateWithLifecycle()
-    val consentPrompt by viewModel.consentPrompt.collectAsStateWithLifecycle()
     val shareHint by viewModel.shareHint.collectAsStateWithLifecycle()
 
     var showSettings by rememberSaveable { mutableStateOf(false) }
     var showApiKeyDialog by rememberSaveable { mutableStateOf(false) }
-    var showCloudConsent by rememberSaveable { mutableStateOf(false) }
+    /** Audio the consent dialog was opened for; null while it is hidden. */
+    var consentForAudio by rememberSaveable { mutableStateOf<String?>(null) }
     var confirmMeteredDownload by rememberSaveable { mutableStateOf(false) }
     val context = LocalContext.current
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
-
-    LaunchedEffect(consentPrompt) {
-        // Shared audio for a cloud model waits for the same consent dialog as a tap.
-        if (consentPrompt) {
-            showCloudConsent = true
-            viewModel.consentPromptShown()
-        }
-    }
 
     val engine = engineOf(state)
     fun startDownload() {
         val metered = context.getSystemService(ConnectivityManager::class.java)?.isActiveNetworkMetered == true
         if (metered) confirmMeteredDownload = true else viewModel.downloadModel()
     }
-    // A tap while the model is still being prepared starts the transcription right after.
-    var pendingTranscribe by rememberSaveable { mutableStateOf(false) }
-    LaunchedEffect(pendingTranscribe, state.busy) {
-        if (pendingTranscribe && !state.busy) {
-            pendingTranscribe = false
-            if (state.canTranscribe && viewModel.transcribe()) onWorkStarted()
+    LaunchedEffect(pendingStart, state) {
+        val pending = pendingStart ?: return@LaunchedEffect
+        when (pendingStartAction(pending, state)) {
+            PendingStartAction.WAIT -> Unit
+            PendingStartAction.DROP -> pendingStart = null
+            PendingStartAction.START -> {
+                pendingStart = null
+                if (viewModel.transcribe(pending.audioUri, pending.modelId)) onWorkStarted()
+            }
         }
     }
-    fun startOrQueue() {
-        if (state.progress is TranscriptionProgress.LoadingModel) pendingTranscribe = true
-        else if (viewModel.transcribe()) onWorkStarted()
+    /** Starts (or queues) a transcription of exactly [audioUri] with the selected model. */
+    fun startOrQueue(audioUri: String) {
+        val modelId = state.selectedModelId ?: return
+        if (state.audioUri != audioUri) return
+        if (state.progress is TranscriptionProgress.LoadingModel) pendingStart = PendingStart(audioUri, modelId)
+        else if (viewModel.transcribe(audioUri, modelId)) onWorkStarted()
     }
     fun transcribe() {
-        if (engine == Engine.CLOUD && !cloudConsent) showCloudConsent = true
-        else startOrQueue()
+        val audio = state.audioUri ?: return
+        if (engine == Engine.CLOUD && !cloudConsent) consentForAudio = audio
+        else startOrQueue(audio)
+    }
+    fun cancel() {
+        pendingStart = null
+        viewModel.cancel()
+    }
+    // The dialog belongs to the audio it was opened for; new audio closes it unanswered.
+    LaunchedEffect(state.audioUri, consentForAudio) {
+        if (consentForAudio != null && consentForAudio != state.audioUri) consentForAudio = null
     }
 
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
@@ -205,7 +219,7 @@ fun MainScreen(
         bottomBar = {
             // The keyboard would cover the bar while Scaffold still reserved its height, leaving a
             // device-dependent gap above the keyboard: hide it while typing.
-            if (!imeVisible) ActionBar(state, engine, onTranscribe = ::transcribe, onCancel = viewModel::cancel)
+            if (!imeVisible) ActionBar(state, engine, onTranscribe = ::transcribe, onCancel = ::cancel)
         },
         snackbarHost = { SnackbarHost(snackbar) },
         containerColor = MaterialTheme.colorScheme.surface
@@ -215,7 +229,7 @@ fun MainScreen(
                 ConnectedToggleGroup(
                     options = Engine.entries,
                     selected = engine,
-                    onSelect = viewModel::selectEngine,
+                    onSelect = { pendingStart = null; viewModel.selectEngine(it) },
                     enabled = !state.working,
                     modifier = Modifier.fillMaxWidth()
                 ) { option, _ ->
@@ -295,7 +309,7 @@ fun MainScreen(
     if (showVoiceNotes) {
         VoiceNoteSheet(
             viewModel = viewModel,
-            onPick = { uri -> showVoiceNotes = false; viewModel.setAudio(uri) },
+            onPick = { uri -> showVoiceNotes = false; pickAudio(uri) },
             onChangeFolder = { showVoiceNotes = false; folderPicker.launch(null) },
             onSystemPicker = { showVoiceNotes = false; whatsAppSystemPicker.launch(AUDIO_TYPES) },
             onDismiss = { showVoiceNotes = false }
@@ -309,14 +323,15 @@ fun MainScreen(
             onEditKey = { showSettings = false; showApiKeyDialog = true }
         )
     }
-    if (showCloudConsent) {
+    consentForAudio?.let { audio ->
         CloudConsentDialog(
             onConfirm = {
-                showCloudConsent = false
+                consentForAudio = null
                 viewModel.grantCloudUploadConsent()
-                startOrQueue()
+                // Only the audio the dialog was shown for, and only while Cloud is still selected.
+                if (engineOf(state) == Engine.CLOUD) startOrQueue(audio)
             },
-            onDismiss = { showCloudConsent = false }
+            onDismiss = { consentForAudio = null }
         )
     }
     if (showApiKeyDialog) ApiKeyDialogHost(viewModel, onDismiss = { showApiKeyDialog = false })

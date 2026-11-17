@@ -28,8 +28,6 @@ class SharedWorkController(
     private val startService: () -> Unit,
     private val autoStart: () -> SharedAutoStart
 ) {
-    private val mutableConsentPrompt = MutableStateFlow(false)
-    val consentPrompt = mutableConsentPrompt.asStateFlow()
     private val mutableShareHint = MutableStateFlow<String?>(null)
     val shareHint = mutableShareHint.asStateFlow()
     private class PendingShare(val releaseService: () -> Unit) {
@@ -50,7 +48,6 @@ class SharedWorkController(
         pendingShare = null
         pending?.job?.cancel()
         pending?.release()
-        mutableConsentPrompt.value = false
     }
 
     fun setAudio(source: String, persist: Boolean): Job {
@@ -67,7 +64,8 @@ class SharedWorkController(
     /**
      * Reserve while visible, then await metadata, catalog and any import/preparation in the
      * process scope. In the background only a running foreground service permits auto-start;
-     * otherwise keep the audio and show a hint. Never select a cloud fallback or skip consent.
+     * otherwise keep the audio and show a hint. Never select a cloud fallback, and never start
+     * a cloud upload: for the cloud a share only loads the audio until the user taps Transcribe.
      */
     fun onSharedAudio(source: String): Job {
         cancelPendingShare()
@@ -84,18 +82,19 @@ class SharedWorkController(
             awaitInitialRefresh()
             coroutineContext.ensureActive()
             if (token != generation) return@launch
-            val decision = coordinator.state.map { decideSharedAudio(it, source, cloudConsent()) }
+            val decision = coordinator.state.map { decideSharedAudio(it, source) }
                 .first { it != SharedAudioDecision.WAIT }
             coroutineContext.ensureActive()
             if (token != generation) return@launch
             when (decision) {
                 SharedAudioDecision.TRANSCRIBE -> when (autoStart()) {
-                    SharedAutoStart.START -> transcribe()
-                    SharedAutoStart.START_IN_RUNNING_SERVICE -> transcribe(startService = false)
+                    SharedAutoStart.START -> transcribe(audioUri = source)
+                    SharedAutoStart.START_IN_RUNNING_SERVICE -> transcribe(startService = false, audioUri = source)
                     SharedAutoStart.HINT_ONLY ->
                         mutableShareHint.value = "Shared audio is loaded. Tap Transcribe to start."
                 }
-                SharedAudioDecision.NEEDS_CONSENT -> mutableConsentPrompt.value = true
+                SharedAudioDecision.CLOUD_NEEDS_TAP ->
+                    mutableShareHint.value = "Shared audio is loaded. Tap Transcribe to upload it to Mistral."
                 else -> Unit
             }
         }
@@ -109,12 +108,13 @@ class SharedWorkController(
         return job
     }
 
-    fun consentPromptShown() { mutableConsentPrompt.value = false }
-
-    /** Enforce consent at the actual start, including background shares, not only in the UI. */
-    fun transcribe(startService: Boolean = true): Boolean {
+    /**
+     * Enforce consent at the actual start, not only in the UI. A non-null [audioUri] or
+     * [modelId] binds the start to the audio and model the user (or the share) meant.
+     */
+    fun transcribe(startService: Boolean = true, audioUri: String? = null, modelId: String? = null): Boolean {
         if (coordinator.state.value.selectedModel?.isCloud() == true && !cloudConsent()) return false
-        val started = coordinator.transcribe()
+        val started = coordinator.transcribe(audioUri, modelId)
         if (started) mutableShareHint.value = null
         if (started && startService) this.startService()
         return started

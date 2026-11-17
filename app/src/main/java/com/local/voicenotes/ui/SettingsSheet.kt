@@ -75,6 +75,7 @@ fun SettingsSheet(
 ) {
     val themeMode by viewModel.themeMode.collectAsStateWithLifecycle()
     val dynamicColor by viewModel.dynamicColor.collectAsStateWithLifecycle()
+    val cloudConsent by viewModel.cloudUploadConsent.collectAsStateWithLifecycle()
     val modelPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(viewModel::importModel)
     }
@@ -181,6 +182,17 @@ fun SettingsSheet(
                     colors = ListItemDefaults.colors(containerColor = Color.Transparent),
                     modifier = Modifier.clickable(enabled = !state.busy, onClickLabel = "Change Mistral API key", onClick = onEditKey)
                 )
+                // Consent is remembered after the first upload; this is the only way to withdraw it.
+                if (cloudConsent) {
+                    HorizontalDivider(color = MaterialTheme.colorScheme.surfaceContainerLow)
+                    ListItem(
+                        headlineContent = { Text("Uploads allowed") },
+                        supportingContent = { Text("Transcribe uploads to Mistral without asking") },
+                        leadingContent = { Icon(AppIcons.Cloud, null) },
+                        trailingContent = { TextButton(onClick = viewModel::revokeCloudUploadConsent) { Text("Revoke") } },
+                        colors = ListItemDefaults.colors(containerColor = Color.Transparent)
+                    )
+                }
             }
 
             // ---- About

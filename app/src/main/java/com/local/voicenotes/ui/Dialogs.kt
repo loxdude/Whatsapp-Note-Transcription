@@ -43,10 +43,11 @@ fun CloudConsentDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
         text = {
             Text(
                 "Cloud transcription uploads your audio file to Mistral AI. On-device transcription " +
-                    "never uploads audio. You can switch back to Local at any time."
+                    "never uploads audio. Your choice is remembered: later uploads start without asking. " +
+                    "You can turn this off in Settings."
             )
         },
-        confirmButton = { Button(onClick = onConfirm) { Text("Upload and transcribe") } },
+        confirmButton = { Button(onClick = onConfirm) { Text("Allow and transcribe") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
     )
 }
