@@ -19,6 +19,9 @@ data class OngoingNotice(val kind: WorkKind, val title: String, val text: String
 /** Notification posted once work ended while the user was away. */
 data class FinishedNotice(val title: String, val text: String)
 
+/** Work kinds running now and notices for kinds that ended since the previous state. */
+data class WorkUpdate(val running: Set<WorkKind>, val finished: List<FinishedNotice>)
+
 /**
  * Pure mapping from coordinator state to foreground-service behaviour, kept free of Android
  * types so it can be unit-tested.
@@ -47,6 +50,23 @@ object WorkNotificationPolicy {
         work(state) ?: downloadNotice(download) ?: if (shareReserved) {
             OngoingNotice(WorkKind.SHARE, "Shared voice note", "Getting ready to transcribe", null)
         } else null
+
+    /** Every kind running in parallel, not only the one shown in the notification. */
+    fun runningKinds(state: AppUiState, shareReserved: Boolean = false, download: DownloadState = DownloadState.Idle): Set<WorkKind> =
+        setOfNotNull(work(state)?.kind, downloadNotice(download)?.kind, WorkKind.SHARE.takeIf { shareReserved })
+
+    /**
+     * Tracks each kind separately: a kind in [previous] that is no longer running gets its
+     * finished notice, even while another kind (e.g. a model download) still runs.
+     * Notices are ordered by [WorkKind] declaration (transcription before download).
+     */
+    fun update(
+        previous: Set<WorkKind>, state: AppUiState, shareReserved: Boolean = false, download: DownloadState = DownloadState.Idle
+    ): WorkUpdate {
+        val running = runningKinds(state, shareReserved, download)
+        val finished = (previous - running).sorted().mapNotNull { finished(it, state, download) }
+        return WorkUpdate(running, finished)
+    }
 
     private fun downloadNotice(download: DownloadState): OngoingNotice? = when (download) {
         is DownloadState.Running -> OngoingNotice(

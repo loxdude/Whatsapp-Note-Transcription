@@ -225,9 +225,21 @@ class AppGraph(private val app: VoiceNotesApplication) {
      */
     fun startWorkService(): Boolean {
         val started = TranscriptionService.start(app)
-        if (!started) log("Foreground service could not start; work continues without it.")
+        if (!started) {
+            log("Foreground service could not start; work continues without it.")
+            reportBackgroundProtectionLost()
+        }
         return started
     }
+
+    private val mutableBackgroundProtectionLost = MutableStateFlow(false)
+    /** True once work runs without the foreground service; the main screen shows a hint. */
+    val backgroundProtectionLost: StateFlow<Boolean> = mutableBackgroundProtectionLost.asStateFlow()
+
+    /** Called when the service could not start or was refused the foreground. */
+    fun reportBackgroundProtectionLost() { mutableBackgroundProtectionLost.value = true }
+
+    fun backgroundProtectionHintShown() { mutableBackgroundProtectionLost.value = false }
 
     /** True while the work service runs in the foreground. Main thread; set by the service. */
     @Volatile var workServiceInForeground = false

@@ -41,6 +41,31 @@ class OpusPcmTest {
         catch (expected: IllegalArgumentException) { assertTrue(expected.message!!.contains("15-minute")) }
     }
 
+    @Test fun `unknown provider length still reaches the 64 MiB input cap`() {
+        val over = OpusPcm.MAX_INPUT_BYTES + 1
+        // Declared length wins; an unknown one falls back to the regular-file size past the offset.
+        assertEquals(100L, OpusPcm.nativeInputLength(100, 0, over))
+        assertEquals(over - 10, OpusPcm.nativeInputLength(-1, 10, over))
+        // Not stat-able as a regular file: only the native read budget applies.
+        assertEquals(-1L, OpusPcm.nativeInputLength(-1, 0, -1))
+        // Then a provider-reported size above the cap rejects the confirmed Opus stream.
+        try { OpusPcm.checkReportedSize(over); fail("accepted oversize Opus input") }
+        catch (expected: IllegalArgumentException) { assertTrue(expected.message!!.contains("safety limits")) }
+        OpusPcm.checkReportedSize(OpusPcm.MAX_INPUT_BYTES)
+        OpusPcm.checkReportedSize(null)
+    }
+
+    @Test fun `stalled platform decoder fails after the timeout without progress`() {
+        var now = 0L
+        val watchdog = DecoderStallWatchdog(timeoutNanos = 10, nowNanos = { now })
+        now = 9; watchdog.check()
+        watchdog.progressed()
+        now = 18; watchdog.check()
+        now = 19
+        try { watchdog.check(); fail("stalled decoder was not detected") }
+        catch (expected: java.io.IOException) { assertEquals("The audio decoder stopped responding.", expected.message) }
+    }
+
     @Test fun `cancellation is not swallowed as native fallback`() {
         val source = Source(FloatArray(48_000))
         var checks = 0

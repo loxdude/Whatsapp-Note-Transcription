@@ -7,7 +7,6 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
-import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.local.voicenotes.AppUiState
@@ -65,7 +64,7 @@ class TranscriptionService : Service() {
     private var latestStartId = 0
     private var inForeground = false
     private var shownNotice: OngoingNotice? = null
-    private var lastKind: WorkKind? = null
+    private var runningKinds: Set<WorkKind> = emptySet()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -93,6 +92,7 @@ class TranscriptionService : Service() {
             }
         }
         if (lastRefusal != null) {
+            appGraph.reportBackgroundProtectionLost()
             // Only stops if no newer start is pending (that one gets its own startForeground).
             stopSelfResult(startId)
             return START_NOT_STICKY
@@ -115,22 +115,21 @@ class TranscriptionService : Service() {
         WorkNotificationPolicy.ongoing(appGraph.coordinator.state.value, appGraph.shareReservations.value > 0, appGraph.modelDownload.value)
 
     private fun onState(state: AppUiState, shareReserved: Boolean, download: DownloadState) {
-        val notice = WorkNotificationPolicy.ongoing(state, shareReserved, download)
-        if (notice != null) {
-            lastKind = notice.kind
-            if (inForeground && notice != shownNotice) {
-                shownNotice = notice
-                runCatching {
-                    NotificationManagerCompat.from(this)
-                        .notify(WorkNotifications.ONGOING_ID, WorkNotifications.ongoing(this, notice))
-                }
-            }
-            return
-        }
-        val finished = WorkNotificationPolicy.finished(lastKind, state, download)
-        lastKind = null
+        // Per kind: a transcription that ends during a model download still gets its notice.
+        val update = WorkNotificationPolicy.update(runningKinds, state, shareReserved, download)
+        runningKinds = update.running
+        // One finished slot: the first (most relevant) notice wins if several ended at once.
+        val finished = update.finished.firstOrNull()
         if (finished != null && !voiceNotesApp.isInForeground) {
             WorkNotifications.postFinished(this, finished)
+        }
+        val notice = WorkNotificationPolicy.ongoing(state, shareReserved, download)
+        if (notice != null) {
+            if (inForeground && notice != shownNotice) {
+                shownNotice = notice
+                WorkNotifications.updateOngoing(this, notice)
+            }
+            return
         }
         leaveForeground()
         // Keeps running if a newer start (new work) is already queued; its onStartCommand

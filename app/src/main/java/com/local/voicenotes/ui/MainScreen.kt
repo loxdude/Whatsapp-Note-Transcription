@@ -161,6 +161,15 @@ fun MainScreen(
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
+    val protectionLost by viewModel.backgroundProtectionLost.collectAsStateWithLifecycle()
+    LaunchedEffect(protectionLost) {
+        if (protectionLost) {
+            // Screen scope: resetting the flag restarts this effect, which must not dismiss the hint.
+            scope.launch { snackbar.showSnackbar("Keep the app open until the transcription finishes.") }
+            viewModel.backgroundProtectionHintShown()
+        }
+    }
+
     val engine = engineOf(state)
     fun startDownload() {
         val metered = context.getSystemService(ConnectivityManager::class.java)?.isActiveNetworkMetered == true

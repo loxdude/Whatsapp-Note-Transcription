@@ -43,6 +43,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val shareHint = graph.shareHint
 
     val modelDownload: StateFlow<DownloadState> = graph.modelDownload
+    val backgroundProtectionLost: StateFlow<Boolean> = graph.backgroundProtectionLost
+    fun backgroundProtectionHintShown() = graph.backgroundProtectionHintShown()
 
     // ---- Appearance ---------------------------------------------------------------------
 
