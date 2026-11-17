@@ -59,7 +59,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LargeTopAppBar
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -189,8 +188,10 @@ fun MainScreen(
     Scaffold(
         modifier = Modifier.fillMaxSize().nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
-            LargeTopAppBar(
-                title = { Text("Voice notes") },
+            AppTopBar(
+                title = "Voice notes",
+                scrollBehavior = scrollBehavior,
+                showLogo = true,
                 actions = {
                     IconButton(onClick = { viewModel.setShowHistory(true) }) {
                         Icon(AppIcons.History, contentDescription = "Transcript history")
@@ -198,12 +199,7 @@ fun MainScreen(
                     IconButton(onClick = { showSettings = true }) {
                         Icon(Icons.Default.Settings, contentDescription = "Transcription settings")
                     }
-                },
-                scrollBehavior = scrollBehavior,
-                colors = TopAppBarDefaults.largeTopAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    scrolledContainerColor = MaterialTheme.colorScheme.surfaceContainer
-                )
+                }
             )
         },
         bottomBar = {
@@ -456,7 +452,7 @@ private fun AudioCard(state: AppUiState, shareHint: String?, onWhatsApp: () -> U
                 Text("Or share one from WhatsApp and choose Transcribe.",
                     style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Waveform(animated = rememberSettledWork(state), modifier = Modifier.fillMaxWidth().height(if (hasAudio) 36.dp else 48.dp))
+            if (!isShortScreen()) Waveform(animated = rememberSettledWork(state), modifier = Modifier.fillMaxWidth().height(if (hasAudio) 36.dp else 48.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilledTonalButton(onClick = onWhatsApp, enabled = !state.working, modifier = Modifier.weight(1f).height(48.dp),
                     contentPadding = PaddingValues(horizontal = 12.dp)) {
@@ -532,9 +528,12 @@ private fun TranscriptCard(
 
 @Composable
 private fun ActionBar(state: AppUiState, engine: Engine, onTranscribe: () -> Unit, onCancel: () -> Unit) {
+    val short = isShortScreen()
+    val buttonHeight = if (short) 48.dp else 60.dp
     Surface(color = MaterialTheme.colorScheme.surfaceContainer, tonalElevation = 0.dp) {
         Column(
-            Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 16.dp, vertical = 12.dp),
+            Modifier.fillMaxWidth().navigationBarsPadding()
+                .padding(horizontal = 16.dp, vertical = if (short) 6.dp else 12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             // Short runs (most notes take well under a second to start) show no progress UI.
@@ -543,7 +542,7 @@ private fun ActionBar(state: AppUiState, engine: Engine, onTranscribe: () -> Uni
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Button(
                     onClick = onTranscribe, enabled = state.canRequestTranscription,
-                    shape = CircleShape, modifier = Modifier.weight(1f).height(60.dp),
+                    shape = CircleShape, modifier = Modifier.weight(1f).height(buttonHeight),
                     contentPadding = ButtonDefaults.ButtonWithIconContentPadding
                 ) {
                     Icon(AppIcons.Mic, null, Modifier.size(22.dp))
@@ -558,7 +557,7 @@ private fun ActionBar(state: AppUiState, engine: Engine, onTranscribe: () -> Uni
                     )
                 }
                 AnimatedVisibility(visible = settled) {
-                    OutlinedButton(onClick = onCancel, shape = CircleShape, modifier = Modifier.height(60.dp)) {
+                    OutlinedButton(onClick = onCancel, shape = CircleShape, modifier = Modifier.height(buttonHeight)) {
                         Icon(Icons.Default.Close, null, Modifier.size(ButtonDefaults.IconSize))
                         Spacer(Modifier.width(ButtonDefaults.IconSpacing))
                         Text("Cancel")

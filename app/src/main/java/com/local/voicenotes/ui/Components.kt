@@ -120,6 +120,41 @@ fun rememberSettledWork(state: com.local.voicenotes.AppUiState): Boolean =
         if (state.progress is com.local.voicenotes.domain.TranscriptionProgress.LoadingModel) 2_500 else 600
     )
 
+/** Single-row top bar; the large/medium collapsing bars wasted space, above all in landscape. */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+fun AppTopBar(
+    title: String,
+    scrollBehavior: androidx.compose.material3.TopAppBarScrollBehavior,
+    navigationIcon: @Composable () -> Unit = {},
+    showLogo: Boolean = false,
+    actions: @Composable RowScope.() -> Unit = {}
+) {
+    val colors = androidx.compose.material3.TopAppBarDefaults.topAppBarColors(
+        containerColor = MaterialTheme.colorScheme.surface,
+        scrolledContainerColor = MaterialTheme.colorScheme.surfaceContainer
+    )
+    androidx.compose.material3.TopAppBar(
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (showLogo) {
+                    Icon(AppIcons.Logo, contentDescription = null, tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(28.dp))
+                    androidx.compose.foundation.layout.Spacer(Modifier.size(10.dp))
+                }
+                Text(title, style = MaterialTheme.typography.titleLarge)
+            }
+        },
+        navigationIcon = navigationIcon, actions = actions,
+        expandedHeight = 56.dp,
+        scrollBehavior = scrollBehavior, colors = colors
+    )
+}
+
+/** Landscape phones: less than 600 dp of height, so vertical chrome must be compact. */
+@Composable
+fun isShortScreen(): Boolean = androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp < 600
+
 /** Icon on a tinted circle, used as the leading visual of cards. */
 @Composable
 fun IconBadge(

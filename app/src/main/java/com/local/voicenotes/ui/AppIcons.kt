@@ -16,6 +16,15 @@ object AppIcons {
             paths.forEach { addPath(addPathNodes(it), fill = SolidColor(Color.Black)) }
         }.build()
 
+    /** The app logo (launcher silhouette: speech bubble with the waveform cut out), cropped to its art. */
+    val Logo by lazy {
+        ImageVector.Builder("Logo", 24.dp, 24.dp, 60f, 60f).apply {
+            addGroup(translationX = -24f, translationY = -26f)
+            addPath(addPathNodes("M41,29h26a15,15 0 0 1 15,15v13a15,15 0 0 1 -15,15h-17l-12,10v-10.8a15,15 0 0 1 -12,-14.2v-13a15,15 0 0 1 15,-15zM36.8,48.2a2.2,2.2 0 0 1 4.4,0v4.6a2.2,2.2 0 0 1 -4.4,0zM44.3,43.2a2.2,2.2 0 0 1 4.4,0v14.6a2.2,2.2 0 0 1 -4.4,0zM51.8,39.2a2.2,2.2 0 0 1 4.4,0v22.6a2.2,2.2 0 0 1 -4.4,0zM59.3,44.2a2.2,2.2 0 0 1 4.4,0v12.6a2.2,2.2 0 0 1 -4.4,0zM66.8,48.2a2.2,2.2 0 0 1 4.4,0v4.6a2.2,2.2 0 0 1 -4.4,0z"), fill = SolidColor(Color.Black),
+                pathFillType = androidx.compose.ui.graphics.PathFillType.EvenOdd)
+            clearGroup()
+        }.build()
+    }
     val Cloud by lazy {
         icon("Cloud", "M19.35,10.04C18.67,6.59 15.64,4 12,4 9.11,4 6.6,5.64 5.35,8.04 2.34,8.36 0,10.91 0,14c0,3.31 2.69,6 6,6h13c2.76,0 5,-2.24 5,-5 0,-2.64 -2.05,-4.78 -4.65,-4.96z")
     }
