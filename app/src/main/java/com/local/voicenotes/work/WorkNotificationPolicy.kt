@@ -110,11 +110,10 @@ object WorkNotificationPolicy {
             ?.let { FinishedNotice("Model import failed", it.message) }
         // Nothing was started (e.g. no usable model): the main screen explains it.
         WorkKind.SHARE -> null
+        // A cancelled download ends Idle and gets no notice.
         WorkKind.DOWNLOAD -> when (download) {
             is DownloadState.Failed -> FinishedNotice("Model download failed", download.message)
-            DownloadState.Idle -> if (state.models.any { it.id == com.local.voicenotes.model.ParakeetUltraDownload.MODEL_ID }) {
-                FinishedNotice("On-device model ready", "Voice notes are now transcribed on this phone.")
-            } else null
+            is DownloadState.Completed -> FinishedNotice("${download.title} ready", "Downloaded and verified on this phone.")
             else -> null
         }
     }

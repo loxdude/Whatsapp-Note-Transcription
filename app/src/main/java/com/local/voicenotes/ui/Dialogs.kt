@@ -29,7 +29,6 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.local.voicenotes.AppViewModel
 import com.local.voicenotes.inference.MistralApiKeyStatus
-import com.local.voicenotes.model.ParakeetUltraDownload
 import com.local.voicenotes.model.formatBytes
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
@@ -53,15 +52,14 @@ fun CloudConsentDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
 }
 
 @Composable
-fun MeteredDownloadDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
+fun MeteredDownloadDialog(sizeBytes: Long, onConfirm: () -> Unit, onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = { Icon(AppIcons.Download, null) },
         title = { Text("Download over mobile data?") },
         text = {
             Text(
-                "The on-device model is ${formatBytes(ParakeetUltraDownload.ENCODER_30S.sizeBytes)}. " +
-                    "Your current connection may be metered."
+                "The model is ${formatBytes(sizeBytes)}. Your current connection may be metered."
             )
         },
         confirmButton = { Button(onClick = onConfirm) { Text("Download anyway") } },
@@ -70,14 +68,14 @@ fun MeteredDownloadDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
 }
 
 @Composable
-fun RemoveModelDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
+fun RemoveModelDialog(title: String, sizeBytes: Long, onConfirm: () -> Unit, onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = { Icon(Icons.Default.Delete, null) },
-        title = { Text("Remove the on-device model?") },
+        title = { Text(title) },
         text = {
             Text(
-                "This frees ${formatBytes(ParakeetUltraDownload.ENCODER_30S.sizeBytes)}. You can download it again " +
+                "This frees ${formatBytes(sizeBytes)}. You can download it again " +
                     "at any time; your transcripts are kept."
             )
         },
@@ -86,6 +84,19 @@ fun RemoveModelDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
                 containerColor = MaterialTheme.colorScheme.error, contentColor = MaterialTheme.colorScheme.onError
             )) { Text("Remove") }
         },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+    )
+}
+
+/** Only one translation model is kept: switching removes the installed one. */
+@Composable
+fun SwitchTranslationModelDialog(removed: String, sizeBytes: Long, onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(AppIcons.Translate, null) },
+        title = { Text("Switch translation model?") },
+        text = { Text("The installed $removed is removed (${formatBytes(sizeBytes)}). The new model needs its own download.") },
+        confirmButton = { Button(onClick = onConfirm) { Text("Switch") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
     )
 }

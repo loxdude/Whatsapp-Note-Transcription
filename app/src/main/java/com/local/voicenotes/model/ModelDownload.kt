@@ -7,8 +7,18 @@ import java.io.IOException
 import java.io.InputStream
 import java.security.MessageDigest
 
-/** A model file published at a fixed URL with a pinned size and SHA-256. */
-data class DownloadSpec(val url: String, val fileName: String, val sizeBytes: Long, val sha256: String)
+/**
+ * A model file published at a fixed URL with a pinned size and SHA-256. [id] is stable and
+ * keys download state and preferences; [title] is what the user sees.
+ */
+data class DownloadSpec(
+    val url: String,
+    val fileName: String,
+    val sizeBytes: Long,
+    val sha256: String,
+    val id: String = fileName,
+    val title: String = fileName
+)
 
 object ParakeetUltraDownload {
     /** CC-BY-4.0 export of litert-community/parakeet-ultra; pinned to the evaluated file. */
@@ -16,7 +26,9 @@ object ParakeetUltraDownload {
         url = "https://huggingface.co/litert-community/parakeet-ultra/resolve/main/parakeet_ultra_encoder_30s_i8.tflite",
         fileName = "parakeet_ultra_encoder_30s_i8.tflite",
         sizeBytes = 665_458_528L,
-        sha256 = "706675fdf2a128c62072f2db02bb70dec5c4ca1c48298e808f0b58fff2a2e5cd"
+        sha256 = "706675fdf2a128c62072f2db02bb70dec5c4ca1c48298e808f0b58fff2a2e5cd",
+        id = "parakeet",
+        title = "Parakeet speech model"
     )
 
     /** Stable record id of the downloaded encoder (independent of the storage path). */
@@ -31,6 +43,8 @@ sealed interface DownloadState {
     }
     data object Verifying : DownloadState
     data class Failed(val message: String) : DownloadState
+    /** Downloaded and verified; reported once so the service can post a "ready" notice. */
+    data class Completed(val title: String) : DownloadState
 }
 
 val DownloadState.active: Boolean get() = this is DownloadState.Running || this is DownloadState.Verifying

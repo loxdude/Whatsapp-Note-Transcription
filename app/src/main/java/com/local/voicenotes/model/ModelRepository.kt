@@ -228,19 +228,25 @@ class ModelRepository(private val context: Context) {
         return model
     }
 
-    /** Persists the verified, app-private encoder written by [ModelDownload]. */
-    suspend fun registerDownloaded(file: File, spec: DownloadSpec): ImportedModel = withContext(Dispatchers.IO) {
+    /** Persists the verified, app-private Parakeet encoder written by [ModelDownload]. */
+    suspend fun registerDownloaded(file: File, spec: DownloadSpec): ImportedModel {
         val evaluation = ParakeetUltraModels.evaluate(spec.fileName)
-        val model = ImportedModel(
-            id = ParakeetUltraDownload.MODEL_ID,
-            displayName = spec.fileName,
-            path = file.absolutePath,
-            sizeBytes = spec.sizeBytes,
-            architecture = evaluation.architecture,
-            backend = evaluation.backend,
-            enabled = evaluation.enabled,
-            note = evaluation.note
+        return registerDownloaded(
+            ImportedModel(
+                id = ParakeetUltraDownload.MODEL_ID,
+                displayName = spec.fileName,
+                path = file.absolutePath,
+                sizeBytes = spec.sizeBytes,
+                architecture = evaluation.architecture,
+                backend = evaluation.backend,
+                enabled = evaluation.enabled,
+                note = evaluation.note
+            )
         )
+    }
+
+    /** Persists the record of a verified, app-private download (replacing one with the same id). */
+    suspend fun registerDownloaded(model: ImportedModel): ImportedModel = withContext(Dispatchers.IO) {
         context.modelDataStore.edit { prefs ->
             val stored = recordsForWrite(prefs)
             val updated = ModelRecords.mergeImport(stored, ::recordId, encodeRecord(model), model.id)

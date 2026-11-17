@@ -12,7 +12,8 @@ import com.local.voicenotes.work.WorkNotifications
  * [com.local.voicenotes.work.TranscriptionService]) after the activity is destroyed.
  */
 class VoiceNotesApplication : Application() {
-    val graph: AppGraph by lazy { AppGraph(this) }
+    private val graphHolder = lazy { AppGraph(this) }
+    val graph: AppGraph by graphHolder
 
     /** Started activities; touched only on the main thread. */
     private var startedActivities = 0
@@ -34,6 +35,11 @@ class VoiceNotesApplication : Application() {
             override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
             override fun onActivityDestroyed(activity: Activity) = Unit
         })
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (graphHolder.isInitialized()) graph.onTrimMemory(level)
     }
 }
 

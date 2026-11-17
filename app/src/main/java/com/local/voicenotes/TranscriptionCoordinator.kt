@@ -69,19 +69,28 @@ fun modelSummary(model: ImportedModel?): String = when {
  * Chooses the model selection for a (re)loaded [models] list:
  * 1. keep [current] (the in-memory choice) if it is still listed and enabled;
  * 2. else restore [saved] (the persisted explicit user choice) if listed and enabled;
- * 3. else pick the first enabled *local* model.
+ * 3. else pick a local model with [pickLocal] (by default the first enabled local one; the app
+ *    passes the user's local model choice).
  * A cloud model is only ever chosen in steps 1/2, i.e. because the user selected it; it is
  * never picked automatically, so audio is not uploaded without an explicit choice. Returns null
  * when no usable local model exists.
  */
-fun chooseSelection(models: List<ImportedModel>, current: String?, saved: String?): String? {
+fun chooseSelection(
+    models: List<ImportedModel>,
+    current: String?,
+    saved: String?,
+    pickLocal: (List<ImportedModel>) -> ImportedModel? = ::firstLocalModel
+): String? {
     fun usable(id: String?) = id != null && models.any { it.id == id && it.enabled }
     return when {
         usable(current) -> current
         usable(saved) -> saved
-        else -> models.firstOrNull { it.enabled && !it.isCloud() }?.id
+        else -> pickLocal(models)?.takeIf { it.enabled && !it.isCloud() }?.id
     }
 }
+
+/** Default automatic local pick: the first enabled on-device model. */
+fun firstLocalModel(models: List<ImportedModel>): ImportedModel? = models.firstOrNull { it.enabled && !it.isCloud() }
 
 /** Persistent model list and selection. Implemented on Android by ModelRepository. */
 interface ModelCatalog {
@@ -142,7 +151,9 @@ class TranscriptionCoordinator(
      */
     private val onTranscriptCompleted: (CompletedTranscript) -> Unit = {},
     /** Called after the user edited the transcript of completed transcription [id]. */
-    private val onTranscriptEdited: (id: String, text: String) -> Unit = { _, _ -> }
+    private val onTranscriptEdited: (id: String, text: String) -> Unit = { _, _ -> },
+    /** Which local model an automatic selection may pick (see [chooseSelection]). */
+    private val pickLocal: (List<ImportedModel>) -> ImportedModel? = ::firstLocalModel
 ) {
     private enum class Kind { IMPORT, TRANSCRIBE }
 
@@ -301,7 +312,7 @@ class TranscriptionCoordinator(
             if (modelsVersion != startVersion) {
                 val state = mutableState.value
                 if (state.selectedModelId == null) {
-                    val fallback = chooseSelection(state.models, current = null, saved = saved)
+                    val fallback = chooseSelection(state.models, current = null, saved = saved, pickLocal = pickLocal)
                     if (fallback != null) write { it.copy(selectedModelId = fallback) }
                 }
                 return
@@ -309,7 +320,7 @@ class TranscriptionCoordinator(
             // A refresh can finish after the user has selected a model. Keep that in-memory
             // choice instead of restoring the older persisted selection over it.
             val current = mutableState.value.selectedModelId
-            val selected = chooseSelection(models, current, saved)
+            val selected = chooseSelection(models, current, saved, pickLocal)
             modelsVersion++
             val publish = { state: AppUiState -> state.copy(models = models, selectedModelId = selected) }
             // An import or transcription owns the progress; it will prepare when needed.
@@ -362,7 +373,7 @@ class TranscriptionCoordinator(
                     foregroundKind = null
                 }
                 val current = mutableState.value.selectedModelId
-                val selected = if (entry.enabled) entry.id else chooseSelection(models, current, saved = null)
+                val selected = if (entry.enabled) entry.id else chooseSelection(models, current, saved = null, pickLocal = pickLocal)
                 modelsVersion++
                 val publish = { state: AppUiState -> state.copy(models = models, selectedModelId = selected) }
                 if (entry.enabled) {

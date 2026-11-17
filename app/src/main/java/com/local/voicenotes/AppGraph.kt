@@ -12,13 +12,28 @@ import com.local.voicenotes.history.TranscriptHistoryStore
 import com.local.voicenotes.inference.LiteRtParakeetBackend
 import com.local.voicenotes.inference.MistralApiKeyStore
 import com.local.voicenotes.inference.MistralTranscriptionBackend
+import com.local.voicenotes.domain.TranscriptionProgress
+import com.local.voicenotes.inference.CohereArabicBackend
+import com.local.voicenotes.inference.CpuCores
+import com.local.voicenotes.model.CohereArabicModel
+import com.local.voicenotes.model.DownloadSpec
 import com.local.voicenotes.model.DownloadState
-import com.local.voicenotes.model.ModelDownload
+import com.local.voicenotes.model.LocalModelChoice
+import com.local.voicenotes.model.ModelDownloads
 import com.local.voicenotes.model.ModelRepository
+import com.local.voicenotes.model.ModelSpecs
 import com.local.voicenotes.model.OkHttpRangeSource
 import com.local.voicenotes.model.ParakeetUltraDownload
 import com.local.voicenotes.model.ParakeetUltraModels
-import com.local.voicenotes.model.active
+import com.local.voicenotes.model.SettingsStore
+import com.local.voicenotes.model.TranslationModel
+import com.local.voicenotes.model.TranslationSettings
+import com.local.voicenotes.model.translationModelsReplacedBy
+import com.local.voicenotes.translate.GemmaTranslator
+import com.local.voicenotes.translate.TranslationController
+import com.local.voicenotes.translate.TranslationText
+import com.local.voicenotes.translate.running
+import com.local.voicenotes.ui.localModelFor
 import com.local.voicenotes.share.SharedWorkController
 import com.local.voicenotes.share.sharedAutoStart
 import com.local.voicenotes.work.TranscriptionService
@@ -32,9 +47,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.Call
 import java.util.concurrent.atomic.AtomicReference
@@ -64,6 +79,7 @@ class AppGraph(private val app: VoiceNotesApplication) {
     private val repository = ModelRepository(app)
     private val decoder = AndroidAudioDecoder(app.contentResolver)
     private val liteRtBackend = LiteRtParakeetBackend(app)
+    private val cohereBackend = CohereArabicBackend { CpuCores.inferenceThreads(CpuCores.readMaxFreqsKhz()) }
     val mistralApiKeyStore = MistralApiKeyStore(app)
     private val mistralBackend = MistralTranscriptionBackend(app, mistralApiKeyStore)
 
@@ -88,6 +104,7 @@ class AppGraph(private val app: VoiceNotesApplication) {
         decoder = PcmDecoder { source, onProgress -> decoder.decode(Uri.parse(source), onProgress) },
         backends = mapOf(
             ParakeetUltraModels.CPU_BACKEND to liteRtBackend,
+            CohereArabicModel.BACKEND to cohereBackend,
             "mistral-api" to mistralBackend
         ),
         log = ::log,
@@ -102,7 +119,9 @@ class AppGraph(private val app: VoiceNotesApplication) {
                 )
             )
         },
-        onTranscriptEdited = history::updateText
+        onTranscriptEdited = history::updateText,
+        // Automatic local picks follow the user's local model choice (never the other model).
+        pickLocal = { models -> localModelFor(models, localModel.value) }
     )
 
     /**
@@ -141,20 +160,12 @@ class AppGraph(private val app: VoiceNotesApplication) {
     fun cancelAll() {
         cancelWork()
         cancelModelDownload()
+        cancelTranslation()
     }
     /** Remembered until revoked in Settings; the consent dialog says so. */
     fun setCloudUploadConsent(granted: Boolean) {
         consentPreferences.edit().putBoolean("cloud_upload_consent", granted).apply()
         mutableCloudConsent.value = granted
-    }
-
-    init {
-        // Runs once per process, so a recreated activity cannot reset audio of running work.
-        preferences.getString("uri", null)?.let { saved ->
-            runCatching { setAudio(Uri.parse(saved), persist = false) }
-        }
-        initialRefresh = coordinator.refreshModels()
-        releaseReplacedModelCopies()
     }
 
     /**
@@ -244,101 +255,170 @@ class AppGraph(private val app: VoiceNotesApplication) {
     /** True while the work service runs in the foreground. Main thread; set by the service. */
     @Volatile var workServiceInForeground = false
 
-    // ---- One-tap model download -------------------------------------------------------
+    // ---- Model downloads (speech and translation) ------------------------------------------
 
-    private val mutableDownload = MutableStateFlow<DownloadState>(DownloadState.Idle)
-    val modelDownload: StateFlow<DownloadState> = mutableDownload.asStateFlow()
-    private var downloadJob: Job? = null
-    /** Set for the whole removal so a new download cannot register a file the removal then deletes. Main thread. */
-    private var removeJob: Job? = null
     private val downloadCall = AtomicReference<Call?>()
-    private val download = ModelDownload(
+    val downloads = ModelDownloads(
+        scope = scope,
         directory = File(app.noBackupFilesDir, "models"),
-        spec = ParakeetUltraDownload.ENCODER_30S,
-        source = OkHttpRangeSource { downloadCall.set(it) }
+        source = OkHttpRangeSource { downloadCall.set(it) },
+        abortInFlight = { downloadCall.getAndSet(null)?.cancel() },
+        log = ::log
     )
+    /** State of the latest download, for the foreground service. */
+    val modelDownload: StateFlow<DownloadState> = downloads.current
 
     /**
-     * Downloads, verifies and registers the pinned Parakeet Ultra encoder, then selects it unless
-     * the user switched to the cloud meanwhile. Must be called from a user action while visible
-     * (it starts the foreground service). Main thread.
+     * Downloads and verifies [spec]. A speech model is registered and, unless the user switched to
+     * the cloud meanwhile, selected when it is the chosen local model. Must be called from a user
+     * action while visible (it starts the foreground service). Main thread.
      */
-    fun startModelDownload(): Boolean {
-        if (downloadJob?.isCompleted == false || removeJob?.isCompleted == false) return false
-        mutableDownload.value = DownloadState.Running(0, ParakeetUltraDownload.ENCODER_30S.sizeBytes)
-        downloadJob = scope.launch {
-            try {
-                val file = withContext(Dispatchers.IO) {
-                    var lastPublished = -1L
-                    download.run(
-                        checkCancelled = { ensureActive() },
-                        onProgress = { done, total ->
-                            // ~0.25 % steps keep StateFlow/notification churn low.
-                            val step = done * 400 / total
-                            if (step != lastPublished) {
-                                lastPublished = step
-                                mutableDownload.value = DownloadState.Running(done, total)
-                            }
-                        },
-                        onVerifying = { mutableDownload.value = DownloadState.Verifying }
-                    )
-                }
-                val model = repository.registerDownloaded(file, ParakeetUltraDownload.ENCODER_30S)
-                coordinator.refreshModels().join()
-                if (coordinator.state.value.selectedModel?.isCloud() != true) coordinator.selectModel(model.id)
-                mutableDownload.value = DownloadState.Idle
-                log("Model download finished: ${file.length()} bytes")
-            } catch (cancelled: kotlinx.coroutines.CancellationException) {
-                mutableDownload.value = DownloadState.Idle
-                throw cancelled
-            } catch (error: Exception) {
-                // Cancelling the HTTP call surfaces as an IOException in the blocked read.
-                if (!kotlin.coroutines.coroutineContext.isActive) {
-                    mutableDownload.value = DownloadState.Idle
-                    throw kotlinx.coroutines.CancellationException("Download cancelled.").apply { initCause(error) }
-                }
-                log("Model download failed: ${error.message}")
-                mutableDownload.value = DownloadState.Failed(
-                    when (error) {
-                        is java.net.UnknownHostException, is java.net.ConnectException ->
-                            "No internet connection. Check your network and retry."
-                        is java.net.SocketTimeoutException -> "The connection timed out. Tap Retry to resume."
-                        else -> error.message ?: "Download failed."
-                    }
-                )
-            } finally {
-                downloadCall.set(null)
-            }
+    fun startModelDownload(spec: DownloadSpec): Boolean {
+        val started = downloads.start(spec) { file -> onDownloaded(spec, file) }
+        if (started) startWorkService()
+        return started
+    }
+
+    private suspend fun onDownloaded(spec: DownloadSpec, file: File) {
+        val (record, choice) = when (spec.id) {
+            ModelSpecs.PARAKEET.id -> repository.registerDownloaded(file, spec) to LocalModelChoice.PARAKEET
+            ModelSpecs.COHERE_ARABIC.id ->
+                repository.registerDownloaded(CohereArabicModel.record(file.absolutePath)) to LocalModelChoice.ARABIC
+            else -> return
         }
-        startWorkService()
-        return true
+        coordinator.refreshModels().join()
+        val state = coordinator.state.value
+        if (state.selectedModel?.isCloud() != true && localModel.value == choice) coordinator.selectModel(record.id)
     }
 
     /** Cancels a running download; the partial file is kept so a retry resumes. */
-    fun cancelModelDownload() {
-        val job = downloadJob?.takeIf { it.isActive } ?: return
-        job.cancel()
-        downloadCall.getAndSet(null)?.cancel()
-    }
+    fun cancelModelDownload() = downloads.cancel()
 
-    fun dismissDownloadError() {
-        if (mutableDownload.value is DownloadState.Failed) mutableDownload.value = DownloadState.Idle
-    }
+    fun dismissDownloadState(id: String) = downloads.dismiss(id)
 
-    /** Removes the downloaded encoder to free storage. Rejected while work is running. */
-    fun removeDownloadedModel(): Boolean {
-        if (coordinator.state.value.busy || mutableDownload.value.active) return false
-        if (downloadJob?.isCompleted == false || removeJob?.isCompleted == false) return false
-        val wasSelected = coordinator.state.value.selectedModelId == ParakeetUltraDownload.MODEL_ID
-        if (wasSelected && !coordinator.clearSelection()) return false
-        removeJob = scope.launch {
-            runCatching {
-                repository.remove(ParakeetUltraDownload.MODEL_ID)
-                withContext(Dispatchers.IO) { download.delete() }
-            }.onFailure { log("Removing the downloaded model failed: ${it.message}") }
-            coordinator.refreshModels().join()
+    /** Removes a downloaded speech model to free storage. Rejected while work is running. */
+    fun removeSpeechModel(spec: DownloadSpec): Boolean {
+        val id = when (spec.id) {
+            ModelSpecs.PARAKEET.id -> ParakeetUltraDownload.MODEL_ID
+            ModelSpecs.COHERE_ARABIC.id -> CohereArabicModel.MODEL_ID
+            else -> return false
         }
+        if (coordinator.state.value.busy || downloads.busy) return false
+        val wasSelected = coordinator.state.value.selectedModelId == id
+        if (wasSelected && !coordinator.clearSelection()) return false
+        return downloads.remove(
+            listOf(spec),
+            beforeDelete = {
+                repository.remove(id)
+                if (spec.id == ModelSpecs.COHERE_ARABIC.id) cohereBackend.release()
+            },
+            afterDelete = { coordinator.refreshModels().join() }
+        )
+    }
+
+    // ---- Settings: local model and translation -----------------------------------------
+
+    private val settings = SettingsStore(app)
+    private val settingsWrites = Mutex()
+    private val mutableLocalModel = MutableStateFlow(LocalModelChoice.PARAKEET)
+    /** On-device model used by Local transcription. */
+    val localModel: StateFlow<LocalModelChoice> = mutableLocalModel.asStateFlow()
+    private val mutableTranslationSettings = MutableStateFlow(TranslationSettings())
+    val translationSettings: StateFlow<TranslationSettings> = mutableTranslationSettings.asStateFlow()
+
+    private suspend fun loadSettings() {
+        runCatching { settings.load() }
+            .onSuccess {
+                mutableLocalModel.value = it.localModel
+                mutableTranslationSettings.value = it.translation
+            }
+            .onFailure { log("Loading settings failed: ${it.message}") }
+    }
+
+    private fun persist(block: suspend () -> Unit) {
+        scope.launch {
+            // FIFO, so rapid changes are written in the order they were made.
+            settingsWrites.withLock {
+                runCatching { block() }.onFailure { log("Saving settings failed: ${it.message}") }
+            }
+        }
+    }
+
+    /**
+     * Chooses the on-device speech model. While Local is selected the coordinator switches to it
+     * right away, or clears the selection if it is not installed yet (nothing else may run then).
+     * Rejected while a transcription or import runs. Main thread.
+     */
+    fun setLocalModel(choice: LocalModelChoice): Boolean {
+        val state = coordinator.state.value
+        if (state.busy && state.progress !is TranscriptionProgress.LoadingModel) return false
+        mutableLocalModel.value = choice
+        persist { settings.saveLocalModel(choice) }
+        if (choice != LocalModelChoice.ARABIC) cohereBackend.close()
+        if (state.selectedModel?.isCloud() == true) return true
+        val target = localModelFor(state.models, choice, state.selectedModelId)
+        if (target != null) coordinator.selectModel(target.id) else coordinator.clearSelection()
         return true
+    }
+
+    fun setTranslationSettings(update: TranslationSettings) {
+        val previous = mutableTranslationSettings.value
+        if (!update.enabled && previous.enabled) translation.cancel()
+        mutableTranslationSettings.value = update
+        persist { settings.saveTranslation(update) }
+    }
+
+    /**
+     * Switches the translation model and removes the other installed one (only one is kept).
+     * Returns false while a download or removal runs.
+     */
+    fun switchTranslationModel(model: TranslationModel): Boolean {
+        if (downloads.busy) return false
+        val replaced = translationModelsReplacedBy(model, downloads.installed.value)
+        translation.cancel()
+        setTranslationSettings(mutableTranslationSettings.value.copy(model = model))
+        if (replaced.isNotEmpty()) downloads.remove(replaced, beforeDelete = { translator.release() })
+        return true
+    }
+
+    /** Removes every downloaded translation model. */
+    fun removeTranslationModels(): Boolean {
+        if (downloads.busy) return false
+        translation.cancel()
+        val installed = TranslationModel.specs.filter { it.id in downloads.installed.value }
+        return downloads.remove(installed, beforeDelete = { translator.release() })
+    }
+
+    // ---- Translation -------------------------------------------------------------------
+
+    private val translator = GemmaTranslator(app.cacheDir, beforeLoad = { cohereBackend.close() })
+    val translation = TranslationController(scope, ::log)
+
+    /**
+     * Translates the transcript on screen (including the user's edits) and stores the result with
+     * its history entry. Rejected while a transcription runs or the model is missing. Main thread.
+     */
+    fun translate(): Boolean {
+        val state = coordinator.state.value
+        val id = state.transcriptId ?: return false
+        val settings = mutableTranslationSettings.value
+        val spec = settings.model.spec
+        if (state.busy || downloads.removing) return false
+        if (!TranslationText.canOffer(state.transcript, settings, spec.id in downloads.installed.value)) return false
+        val text = state.transcript
+        return translation.start(id, text, translator.forModel(downloads.file(spec), settings.languageName)) { result ->
+            history.updateTranslation(id, result)
+        }
+    }
+
+    fun cancelTranslation() = translation.cancel()
+
+    /** Frees the translation engine when the system needs memory (it loads again on demand). */
+    fun onTrimMemory(level: Int) {
+        @Suppress("DEPRECATION")
+        if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_BACKGROUND && !translation.isRunning) {
+            translator.releaseLater()
+        }
     }
 
     private val mutableShareReservations = MutableStateFlow(0)
@@ -358,5 +438,27 @@ class AppGraph(private val app: VoiceNotesApplication) {
         val release = { if (released.compareAndSet(false, true)) mutableShareReservations.update { it - 1 } }
         if (!startWorkService()) release()
         return release
+    }
+
+    // Last, so every property above is initialized before the first refresh runs.
+    init {
+        // Runs once per process, so a recreated activity cannot reset audio of running work.
+        preferences.getString("uri", null)?.let { saved ->
+            runCatching { setAudio(Uri.parse(saved), persist = false) }
+        }
+        // The local model choice decides automatic selections, so it is loaded first.
+        initialRefresh = scope.launch {
+            loadSettings()
+            coordinator.refreshModels().join()
+        }
+        // A translation belongs to the transcript on screen: new audio or a new transcription (e.g.
+        // of shared audio, which clears the transcript id) stops it, so the two never run together.
+        scope.launch {
+            coordinator.state.collect { state ->
+                val running = translation.state.value
+                if (running.running && running.transcriptId != state.transcriptId) translation.cancel()
+            }
+        }
+        releaseReplacedModelCopies()
     }
 }

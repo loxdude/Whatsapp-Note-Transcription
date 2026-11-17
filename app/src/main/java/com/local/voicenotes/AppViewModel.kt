@@ -7,9 +7,13 @@ import androidx.lifecycle.viewModelScope
 import com.local.voicenotes.domain.LanguageOption
 import com.local.voicenotes.history.HistoryEntry
 import com.local.voicenotes.inference.MistralApiKeyStatus
+import com.local.voicenotes.model.DownloadSpec
 import com.local.voicenotes.model.DownloadState
+import com.local.voicenotes.model.LocalModelChoice
 import com.local.voicenotes.model.ModelRecords
-import com.local.voicenotes.model.ParakeetUltraDownload
+import com.local.voicenotes.model.TranslationModel
+import com.local.voicenotes.model.TranslationSettings
+import com.local.voicenotes.translate.TranslationState
 import com.local.voicenotes.ui.Engine
 import com.local.voicenotes.ui.ThemeMode
 import com.local.voicenotes.ui.bestLocalModel
@@ -42,7 +46,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val cloudUploadConsent = graph.cloudUploadConsent
     val shareHint = graph.shareHint
 
-    val modelDownload: StateFlow<DownloadState> = graph.modelDownload
+    /** Download state per model spec id (missing = idle) and the installed spec ids. */
+    val downloadStates: StateFlow<Map<String, DownloadState>> = graph.downloads.states
+    val installedModels: StateFlow<Set<String>> = graph.downloads.installed
+    val localModel: StateFlow<LocalModelChoice> = graph.localModel
+    val translationSettings: StateFlow<TranslationSettings> = graph.translationSettings
+    val translation: StateFlow<TranslationState> = graph.translation.state
     val backgroundProtectionLost: StateFlow<Boolean> = graph.backgroundProtectionLost
     fun backgroundProtectionHintShown() = graph.backgroundProtectionHintShown()
 
@@ -121,17 +130,23 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         when (engine) {
             Engine.CLOUD -> coordinator.selectModel(ModelRecords.BUILT_IN_MISTRAL_ID)
             Engine.LOCAL -> {
-                val local = bestLocalModel(state.value)
+                val local = bestLocalModel(state.value, graph.localModel.value)
                 if (local != null) coordinator.selectModel(local.id) else coordinator.clearSelection()
             }
         }
     }
 
-    fun downloadModel(): Boolean = graph.startModelDownload()
+    fun downloadModel(spec: DownloadSpec): Boolean = graph.startModelDownload(spec)
     fun cancelModelDownload() = graph.cancelModelDownload()
-    fun dismissDownloadError() = graph.dismissDownloadError()
-    fun removeDownloadedModel(): Boolean = graph.removeDownloadedModel()
-    fun hasDownloadedModel(): Boolean = state.value.models.any { it.id == ParakeetUltraDownload.MODEL_ID }
+    fun dismissDownloadState(id: String) = graph.dismissDownloadState(id)
+    fun removeSpeechModel(spec: DownloadSpec): Boolean = graph.removeSpeechModel(spec)
+
+    fun setLocalModel(choice: LocalModelChoice): Boolean = graph.setLocalModel(choice)
+    fun setTranslationSettings(settings: TranslationSettings) = graph.setTranslationSettings(settings)
+    fun switchTranslationModel(model: TranslationModel): Boolean = graph.switchTranslationModel(model)
+    fun removeTranslationModels(): Boolean = graph.removeTranslationModels()
+    fun translate(): Boolean = graph.translate()
+    fun cancelTranslation() = graph.cancelTranslation()
 
     fun refreshModels() = coordinator.refreshModels()
 

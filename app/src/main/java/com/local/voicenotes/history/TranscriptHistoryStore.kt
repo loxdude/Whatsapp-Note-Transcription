@@ -16,7 +16,9 @@ data class HistoryEntry(
     val text: String,
     /** Length of the decoded audio; null when the backend did not decode it (cloud upload). */
     val audioDurationMillis: Long? = null,
-    val processingMillis: Long? = null
+    val processingMillis: Long? = null,
+    /** Translation made on demand; absent in older files. */
+    val translation: String? = null
 )
 
 /** Data for a new entry; the store assigns the timestamp from its clock. */
@@ -94,6 +96,15 @@ class TranscriptHistoryStore(
         }
         if (changed) commit(updated)
         return changed
+    }
+
+    /** Stores the translation of entry [id]; returns false if the entry no longer exists. */
+    @Synchronized
+    fun updateTranslation(id: String, translation: String): Boolean {
+        val current = entries()
+        if (current.none { it.id == id && it.translation != translation }) return false
+        commit(current.map { if (it.id == id) it.copy(translation = translation) else it })
+        return true
     }
 
     @Synchronized
@@ -231,7 +242,8 @@ class TranscriptHistoryStore(
         "modelName" to entry.modelName,
         "text" to entry.text,
         "audioDurationMillis" to entry.audioDurationMillis,
-        "processingMillis" to entry.processingMillis
+        "processingMillis" to entry.processingMillis,
+        "translation" to entry.translation
     )
 
     /** Skips individual malformed entries instead of discarding the whole history. */
@@ -245,7 +257,8 @@ class TranscriptHistoryStore(
             modelName = map["modelName"] as? String ?: "",
             text = text,
             audioDurationMillis = (map["audioDurationMillis"] as? Number)?.toLong(),
-            processingMillis = (map["processingMillis"] as? Number)?.toLong()
+            processingMillis = (map["processingMillis"] as? Number)?.toLong(),
+            translation = map["translation"] as? String
         )
     }
 }

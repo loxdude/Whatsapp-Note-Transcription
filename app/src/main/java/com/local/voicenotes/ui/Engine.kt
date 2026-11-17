@@ -3,6 +3,8 @@ package com.local.voicenotes.ui
 import com.local.voicenotes.AppUiState
 import com.local.voicenotes.domain.ImportedModel
 import com.local.voicenotes.isCloud
+import com.local.voicenotes.model.CohereArabicModel
+import com.local.voicenotes.model.LocalModelChoice
 import com.local.voicenotes.model.ParakeetUltraDownload
 
 /** The two user-facing transcription engines: Parakeet Ultra on device, or Mistral in the cloud. */
@@ -41,12 +43,24 @@ fun pendingStartAction(pending: PendingStart, state: AppUiState): PendingStartAc
 /** The switch reflects the actual selection; no selection (no local model yet) reads as Local. */
 fun engineOf(state: AppUiState): Engine = if (state.selectedModel?.isCloud() == true) Engine.CLOUD else Engine.LOCAL
 
-/** Usable on-device model: the selected one, else the downloaded encoder, else any import. */
-fun bestLocalModel(state: AppUiState): ImportedModel? {
-    val usable = state.models.filter { it.enabled && !it.isCloud() }
-    return usable.firstOrNull { it.id == state.selectedModelId }
-        ?: usable.firstOrNull { it.id == ParakeetUltraDownload.MODEL_ID }
-        ?: usable.firstOrNull()
+/**
+ * Usable on-device model for [choice]: the Arabic model, or for Parakeet the selected one, else
+ * the downloaded encoder, else any import. Null when the chosen model is not installed.
+ */
+fun bestLocalModel(state: AppUiState, choice: LocalModelChoice = LocalModelChoice.PARAKEET): ImportedModel? =
+    localModelFor(state.models, choice, state.selectedModelId)
+
+fun localModelFor(models: List<ImportedModel>, choice: LocalModelChoice, selectedId: String? = null): ImportedModel? {
+    val usable = models.filter { it.enabled && !it.isCloud() }
+    return when (choice) {
+        LocalModelChoice.ARABIC -> usable.firstOrNull(CohereArabicModel::isArabic)
+        LocalModelChoice.PARAKEET -> {
+            val parakeet = usable.filterNot(CohereArabicModel::isArabic)
+            parakeet.firstOrNull { it.id == selectedId }
+                ?: parakeet.firstOrNull { it.id == ParakeetUltraDownload.MODEL_ID }
+                ?: parakeet.firstOrNull()
+        }
+    }
 }
 
 /** "Local" or "Cloud", for history chips. */

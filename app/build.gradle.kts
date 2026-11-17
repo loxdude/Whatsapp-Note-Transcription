@@ -76,6 +76,8 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.datastore:datastore-preferences:1.1.1")
     implementation("com.google.ai.edge.litert:litert:2.1.6")
+    // On-demand translation with Gemma 4 (ships liblitertlm_jni.so).
+    implementation("com.google.ai.edge.litertlm:litertlm-android:0.19.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     debugImplementation("androidx.compose.ui:ui-tooling")
 

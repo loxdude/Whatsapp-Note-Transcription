@@ -71,6 +71,12 @@ class TranscriptHistory(
     /** Writes pending edits and retries failed persistence, even without new edits. */
     fun flush() = submit { flushEdits() }
 
+    /** Stores a translation of entry [id]; pending edits are written first so a new entry exists. */
+    fun updateTranslation(id: String, translation: String) = submit {
+        flushEdits()
+        store.updateTranslation(id, translation)
+    }
+
     fun delete(id: String) = submit {
         synchronized(editLock) { pendingEdits.remove(id) }
         blankDrafts.remove(id)

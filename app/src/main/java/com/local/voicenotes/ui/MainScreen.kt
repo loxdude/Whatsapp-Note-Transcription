@@ -37,6 +37,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
@@ -95,10 +96,15 @@ import com.local.voicenotes.domain.LanguageOption
 import com.local.voicenotes.domain.TranscriptionProgress
 import com.local.voicenotes.inference.MistralApiKeyStatus
 import com.local.voicenotes.inference.isConfigured
+import com.local.voicenotes.model.DownloadSpec
 import com.local.voicenotes.model.DownloadState
-import com.local.voicenotes.model.ParakeetUltraDownload
+import com.local.voicenotes.model.LocalModelChoice
+import com.local.voicenotes.model.ModelSpecs
 import com.local.voicenotes.model.active
 import com.local.voicenotes.model.formatBytes
+import com.local.voicenotes.translate.TranslationState
+import com.local.voicenotes.translate.TranslationText
+import com.local.voicenotes.translate.running
 import kotlinx.coroutines.launch
 import com.local.voicenotes.share.VoiceNoteFolders
 import java.util.Locale
@@ -147,7 +153,11 @@ fun MainScreen(
             showVoiceNotes = true
         }
     }
-    val download by viewModel.modelDownload.collectAsStateWithLifecycle()
+    val downloads by viewModel.downloadStates.collectAsStateWithLifecycle()
+    val installed by viewModel.installedModels.collectAsStateWithLifecycle()
+    val localModel by viewModel.localModel.collectAsStateWithLifecycle()
+    val translationSettings by viewModel.translationSettings.collectAsStateWithLifecycle()
+    val translation by viewModel.translation.collectAsStateWithLifecycle()
     val keyStatus by viewModel.keyStatus.collectAsStateWithLifecycle()
     val cloudConsent by viewModel.cloudUploadConsent.collectAsStateWithLifecycle()
     val shareHint by viewModel.shareHint.collectAsStateWithLifecycle()
@@ -156,7 +166,8 @@ fun MainScreen(
     var showApiKeyDialog by rememberSaveable { mutableStateOf(false) }
     /** Audio the consent dialog was opened for; null while it is hidden. */
     var consentForAudio by rememberSaveable { mutableStateOf<String?>(null) }
-    var confirmMeteredDownload by rememberSaveable { mutableStateOf(false) }
+    /** Spec id of a download waiting for the metered-network confirmation. */
+    var confirmMeteredDownload by rememberSaveable { mutableStateOf<String?>(null) }
     val context = LocalContext.current
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -171,9 +182,9 @@ fun MainScreen(
     }
 
     val engine = engineOf(state)
-    fun startDownload() {
+    fun startDownload(spec: DownloadSpec) {
         val metered = context.getSystemService(ConnectivityManager::class.java)?.isActiveNetworkMetered == true
-        if (metered) confirmMeteredDownload = true else viewModel.downloadModel()
+        if (metered) confirmMeteredDownload = spec.id else viewModel.downloadModel(spec)
     }
     LaunchedEffect(pendingStart, state) {
         val pending = pendingStart ?: return@LaunchedEffect
@@ -229,7 +240,10 @@ fun MainScreen(
         bottomBar = {
             // The keyboard would cover the bar while Scaffold still reserved its height, leaving a
             // device-dependent gap above the keyboard: hide it while typing.
-            if (!imeVisible) ActionBar(state, engine, onTranscribe = ::transcribe, onCancel = ::cancel)
+            if (!imeVisible) ActionBar(
+                state, engine, translating = translation.running,
+                onTranscribe = ::transcribe, onCancel = ::cancel
+            )
         },
         snackbarHost = { SnackbarHost(snackbar) },
         containerColor = MaterialTheme.colorScheme.surface
@@ -257,8 +271,8 @@ fun MainScreen(
                 ) { shown ->
                     when (shown) {
                         Engine.LOCAL -> LocalStatus(
-                            state, download,
-                            onDownload = ::startDownload,
+                            state, localModel, downloads[localModel.spec.id] ?: DownloadState.Idle,
+                            onDownload = { startDownload(localModel.spec) },
                             onCancelDownload = viewModel::cancelModelDownload,
                             onOpenSettings = { showSettings = true }
                         )
@@ -277,13 +291,36 @@ fun MainScreen(
                 onFiles = { audioPicker.launch(AUDIO_TYPES) }
             )
         }
+        // Translation is offered for whatever transcript is on screen, from any engine.
+        val canTranslate = TranslationText.canOffer(
+            state.transcript, translationSettings, translationSettings.model.spec.id in installed
+        ) && state.transcriptId != null
+        val shownTranslation = translation.takeIf { it.transcriptId != null && it.transcriptId == state.transcriptId }
         val transcriptSection: @Composable (Modifier, Boolean) -> Unit = { modifier, fill ->
-            TranscriptCard(
-                state,
-                onEdit = viewModel::editTranscript,
-                onCopied = { scope.launch { snackbar.showSnackbar("Transcript copied") } },
-                modifier = modifier, fillHeight = fill
-            )
+            Column(modifier, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                TranscriptCard(
+                    state,
+                    onEdit = viewModel::editTranscript,
+                    onCopied = { scope.launch { snackbar.showSnackbar("Transcript copied") } },
+                    modifier = Modifier.fillMaxWidth().then(if (fill) Modifier.weight(1f) else Modifier),
+                    fillHeight = fill,
+                    translate = if (canTranslate && shownTranslation?.running != true) {
+                        { viewModel.translate() }
+                    } else null,
+                    translated = shownTranslation is TranslationState.Done,
+                    translateEnabled = !state.busy
+                )
+                shownTranslation?.takeIf { it !is TranslationState.Idle }?.let { shown ->
+                    TranslationCard(
+                        shown,
+                        language = translationSettings.languageName,
+                        onCancel = viewModel::cancelTranslation,
+                        onRetry = { viewModel.translate() },
+                        onCopied = { scope.launch { snackbar.showSnackbar("Translation copied") } },
+                        modifier = Modifier.fillMaxWidth(), bounded = fill
+                    )
+                }
+            }
         }
         BoxWithConstraints(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).imePadding()) {
             if (maxWidth >= 600.dp) {
@@ -327,7 +364,8 @@ fun MainScreen(
     }
     if (showSettings) {
         SettingsSheet(
-            state = state, viewModel = viewModel, download = download, keyStatus = keyStatus,
+            state = state, viewModel = viewModel, downloads = downloads, installed = installed,
+            localModel = localModel, translation = translationSettings, keyStatus = keyStatus,
             onDismiss = { showSettings = false },
             onDownload = ::startDownload,
             onEditKey = { showSettings = false; showApiKeyDialog = true }
@@ -345,10 +383,11 @@ fun MainScreen(
         )
     }
     if (showApiKeyDialog) ApiKeyDialogHost(viewModel, onDismiss = { showApiKeyDialog = false })
-    if (confirmMeteredDownload) {
+    confirmMeteredDownload?.let(ModelSpecs::byId)?.let { spec ->
         MeteredDownloadDialog(
-            onConfirm = { confirmMeteredDownload = false; viewModel.downloadModel() },
-            onDismiss = { confirmMeteredDownload = false }
+            sizeBytes = spec.sizeBytes,
+            onConfirm = { confirmMeteredDownload = null; viewModel.downloadModel(spec) },
+            onDismiss = { confirmMeteredDownload = null }
         )
     }
 }
@@ -370,12 +409,13 @@ private fun SetupCard(content: @Composable () -> Unit) {
 @Composable
 private fun LocalStatus(
     state: AppUiState,
+    choice: LocalModelChoice,
     download: DownloadState,
     onDownload: () -> Unit,
     onCancelDownload: () -> Unit,
     onOpenSettings: () -> Unit
 ) {
-    val local = bestLocalModel(state)
+    val local = bestLocalModel(state, choice)
     when {
         download.active -> SetupCard {
             Text("Setting up on-device transcription", style = MaterialTheme.typography.titleMedium)
@@ -387,7 +427,7 @@ private fun LocalStatus(
             Text("Set up on-device transcription", style = MaterialTheme.typography.titleMedium)
             Text(
                 "Works offline and keeps your voice notes on this phone. " +
-                    "One-time download of ${formatBytes(ParakeetUltraDownload.ENCODER_30S.sizeBytes)}; Wi-Fi recommended.",
+                    "One-time download of ${formatBytes(choice.spec.sizeBytes)}; Wi-Fi recommended.",
                 style = MaterialTheme.typography.bodyMedium
             )
             (download as? DownloadState.Failed)?.let { failure ->
@@ -405,7 +445,9 @@ private fun LocalStatus(
                     Spacer(Modifier.width(ButtonDefaults.IconSpacing))
                     Text(if (download is DownloadState.Failed) "Retry download" else "Download")
                 }
-                TextButton(onClick = onOpenSettings) { Text("Import file") }
+                TextButton(onClick = onOpenSettings) {
+                    Text(if (choice == LocalModelChoice.PARAKEET) "Import file" else "Settings")
+                }
             }
         }
     }
@@ -502,7 +544,11 @@ private fun AudioCard(state: AppUiState, shareHint: String?, onWhatsApp: () -> U
 @Composable
 private fun TranscriptCard(
     state: AppUiState, onEdit: (String) -> Unit, onCopied: () -> Unit,
-    modifier: Modifier = Modifier, fillHeight: Boolean = false
+    modifier: Modifier = Modifier, fillHeight: Boolean = false,
+    /** Null hides the Translate button. */
+    translate: (() -> Unit)? = null,
+    translated: Boolean = false,
+    translateEnabled: Boolean = true
 ) {
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
@@ -545,6 +591,86 @@ private fun TranscriptCard(
                     }
                 }
             )
+            if (translate != null) {
+                FilledTonalButton(
+                    onClick = translate, enabled = translateEnabled,
+                    modifier = Modifier.padding(top = 12.dp)
+                ) {
+                    Icon(AppIcons.Translate, null, Modifier.size(ButtonDefaults.IconSize))
+                    Spacer(Modifier.width(ButtonDefaults.IconSpacing))
+                    Text(if (translated) "Translate again" else "Translate", maxLines = 1, softWrap = false)
+                }
+            }
+        }
+    }
+}
+
+/** Read-only translation of the transcript on screen: progress with Cancel, the result, or an error. */
+@Composable
+private fun TranslationCard(
+    translation: TranslationState, language: String, onCancel: () -> Unit, onRetry: () -> Unit,
+    onCopied: () -> Unit, modifier: Modifier = Modifier,
+    /** In the two-pane layout the text scrolls inside the card instead of growing the pane. */
+    bounded: Boolean = false
+) {
+    val clipboard = LocalClipboardManager.current
+    val context = LocalContext.current
+    Card(
+        shape = MaterialTheme.shapes.large,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+        modifier = modifier.animateContentSize()
+    ) {
+        Column(Modifier.padding(start = 20.dp, end = 8.dp, top = 8.dp, bottom = 20.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.heightIn(min = 48.dp)) {
+                Text("Translation", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                if (translation is TranslationState.Done) {
+                    IconButton(onClick = { clipboard.setText(AnnotatedString(translation.text)); onCopied() }) {
+                        Icon(AppIcons.ContentCopy, contentDescription = "Copy translation")
+                    }
+                    IconButton(onClick = {
+                        val send = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, translation.text)
+                        context.startActivity(Intent.createChooser(send, "Share translation"))
+                    }) {
+                        Icon(Icons.Default.Share, contentDescription = "Share translation")
+                    }
+                }
+            }
+            Column(Modifier.padding(end = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                when (translation) {
+                    is TranslationState.Loading, is TranslationState.Translating -> {
+                        val progress = translation as? TranslationState.Translating
+                        Text(
+                            if (progress == null) "Loading translation model" else "Translating into $language",
+                            style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        if (progress != null && progress.done > 0) {
+                            LinearProgressIndicator(
+                                progress = { progress.fraction }, modifier = Modifier.fillMaxWidth().height(6.dp),
+                                strokeCap = StrokeCap.Round, gapSize = 4.dp, drawStopIndicator = {}
+                            )
+                        } else {
+                            LinearProgressIndicator(Modifier.fillMaxWidth().height(6.dp), strokeCap = StrokeCap.Round, gapSize = 4.dp)
+                        }
+                        TextButton(onClick = onCancel) { Text("Cancel") }
+                    }
+                    is TranslationState.Done -> SelectionContainer(
+                        if (bounded) Modifier.heightIn(max = 240.dp).verticalScroll(rememberScrollState()) else Modifier
+                    ) {
+                        Text(
+                            translation.text.ifBlank { "(empty translation)" }, style = MaterialTheme.typography.bodyLarge,
+                            modifier = Modifier.semantics { contentDescription = "Translation" }
+                        )
+                    }
+                    is TranslationState.Failed -> {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Icon(Icons.Default.Warning, null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(18.dp))
+                            Text(translation.message, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
+                        }
+                        TextButton(onClick = onRetry) { Text("Retry") }
+                    }
+                    TranslationState.Idle -> Unit
+                }
+            }
         }
     }
 }
@@ -552,7 +678,7 @@ private fun TranscriptCard(
 // ---- Bottom action bar -------------------------------------------------------------------
 
 @Composable
-private fun ActionBar(state: AppUiState, engine: Engine, onTranscribe: () -> Unit, onCancel: () -> Unit) {
+private fun ActionBar(state: AppUiState, engine: Engine, translating: Boolean, onTranscribe: () -> Unit, onCancel: () -> Unit) {
     val short = isShortScreen()
     val buttonHeight = if (short) 48.dp else 60.dp
     Surface(color = MaterialTheme.colorScheme.surfaceContainer, tonalElevation = 0.dp) {
@@ -566,7 +692,8 @@ private fun ActionBar(state: AppUiState, engine: Engine, onTranscribe: () -> Uni
             StatusLine(state, engine, settled)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Button(
-                    onClick = onTranscribe, enabled = state.canRequestTranscription,
+                    // A translation runs alone; it is cancelled from its own card.
+                    onClick = onTranscribe, enabled = state.canRequestTranscription && !translating,
                     shape = CircleShape, modifier = Modifier.weight(1f).height(buttonHeight),
                     contentPadding = ButtonDefaults.ButtonWithIconContentPadding
                 ) {

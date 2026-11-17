@@ -226,6 +226,16 @@ private fun HistoryCard(entry: HistoryEntry, onCopy: () -> Unit, onShare: () -> 
                 modifier = Modifier.fillMaxWidth().padding(end = 12.dp, top = 4.dp)
                     .clickable(onClickLabel = if (expanded) "Collapse" else "Expand") { expanded = !expanded }
             )
+            entry.translation?.takeIf { it.isNotBlank() }?.let { translation ->
+                Text("Translation", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(top = 4.dp))
+                Text(
+                    translation, style = MaterialTheme.typography.bodyLarge,
+                    maxLines = if (expanded) Int.MAX_VALUE else 3, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.fillMaxWidth().padding(end = 12.dp)
+                        .clickable(onClickLabel = if (expanded) "Collapse" else "Expand") { expanded = !expanded }
+                )
+            }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                 IconButton(onClick = onCopy) { Icon(AppIcons.ContentCopy, contentDescription = "Copy") }
                 IconButton(onClick = onShare) { Icon(Icons.Default.Share, contentDescription = "Share") }

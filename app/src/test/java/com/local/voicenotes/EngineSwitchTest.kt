@@ -105,5 +105,7 @@ class EngineSwitchTest {
             WorkNotificationPolicy.finished(WorkKind.DOWNLOAD, idle, DownloadState.Failed("offline"))?.title)
         // Cancelled: nothing installed, nothing to announce.
         assertNull(WorkNotificationPolicy.finished(WorkKind.DOWNLOAD, idle, DownloadState.Idle))
+        assertEquals("Arabic speech model ready",
+            WorkNotificationPolicy.finished(WorkKind.DOWNLOAD, idle, DownloadState.Completed("Arabic speech model"))?.title)
     }
 }
