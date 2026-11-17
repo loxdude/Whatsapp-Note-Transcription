@@ -26,21 +26,23 @@ object VoiceNoteFolders {
     fun isAudio(entry: FolderEntry): Boolean =
         !entry.isDirectory && !entry.name.startsWith(".") && entry.name.substringAfterLast('.', "").lowercase() in audioExtensions
 
+    /** Week folders listed per search: about five months of history at one folder per week. */
+    const val MAX_FOLDERS = 20
+
     /**
-     * Newest [limit] audio files. Week folders are visited newest first (by name, yyyyww, then
-     * modification time) and only as many as needed are listed, so a folder with years of
-     * history stays cheap. [list] returns the children of a folder id.
+     * Newest [limit] audio files by modification time. The root and its newest [maxFolders]
+     * week folders (by name, yyyyww, then modification time) are all listed before sorting:
+     * after a restore or copy, file times need not follow folder names, so stopping at the
+     * first [limit] hits could miss newer notes. The folder cap keeps years of history cheap.
+     * [list] returns the children of a folder id.
      */
-    fun newest(rootId: String, limit: Int, list: (String) -> List<FolderEntry>): List<FolderEntry> {
+    fun newest(rootId: String, limit: Int, maxFolders: Int = MAX_FOLDERS, list: (String) -> List<FolderEntry>): List<FolderEntry> {
         val top = list(rootId)
         val found = top.filter(::isAudio).toMutableList()
-        val folders = top.filter { it.isDirectory && !it.name.startsWith(".") }
+        top.filter { it.isDirectory && !it.name.startsWith(".") }
             .sortedWith(compareByDescending<FolderEntry> { it.name }.thenByDescending { it.lastModifiedMillis })
-        for (folder in folders) {
-            // Older week folders cannot contain newer notes than the ones already found.
-            if (found.size >= limit) break
-            found += list(folder.id).filter(::isAudio)
-        }
+            .take(maxFolders)
+            .forEach { found += list(it.id).filter(::isAudio) }
         return found.sortedByDescending { it.lastModifiedMillis }.take(limit)
     }
 }
