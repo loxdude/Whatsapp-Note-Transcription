@@ -88,6 +88,37 @@ class ModelDownloadTest {
         assertTrue(server.offsets.isEmpty())
     }
 
+    @Test fun aCorruptedCompleteTargetIsReverifiedAndDownloadedAgain() {
+        val dir = tmp.newFolder()
+        val target = File(dir, "model.tflite").apply { writeBytes(payload.copyOf().also { it[10] = (it[10] + 1).toByte() }) }
+        val server = Server()
+        var verifying = 0
+        val file = download(dir, server).run({}, { _, _ -> }, { verifying++ })
+        assertEquals(listOf(0L), server.offsets)
+        assertArrayEquals(payload, target.readBytes())
+        assertEquals(target, file)
+        assertEquals(2, verifying) // existing file, then the fresh download
+
+        // An intact target is returned after hashing, without any request.
+        download(dir, server).run({}, { _, _ -> })
+        assertEquals(listOf(0L), server.offsets)
+    }
+
+    @Test fun aFullSizePartialIsVerifiedAndInstalledOrRestartedFromZero() {
+        val dir = tmp.newFolder()
+        val partial = File(dir, "model.tflite.partial")
+        partial.writeBytes(payload)
+        val server = Server()
+        assertArrayEquals(payload, download(dir, server).run({}, { _, _ -> }).readBytes())
+        assertTrue(server.offsets.isEmpty())
+        assertFalse(partial.exists())
+
+        File(dir, "model.tflite").delete()
+        partial.writeBytes(payload.copyOf().also { it[0] = (it[0] + 1).toByte() })
+        assertArrayEquals(payload, download(dir, server).run({}, { _, _ -> }).readBytes())
+        assertEquals(listOf(0L), server.offsets)
+    }
+
     @Test fun aWrongServerSizeFailsBeforeWritingAnything() {
         val dir = tmp.newFolder()
         try {
