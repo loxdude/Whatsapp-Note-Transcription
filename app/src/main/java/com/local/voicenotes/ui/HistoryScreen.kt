@@ -221,8 +221,7 @@ private fun HistoryCard(entry: HistoryEntry, onCopy: () -> Unit, onShare: () -> 
             }
             val details = listOfNotNull(
                 DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(entry.createdAtMillis)),
-                entry.audioDurationMillis?.let(::formatElapsed),
-                entry.modelName.takeIf { it.isNotBlank() }?.let(::friendlyModelName)
+                entry.audioDurationMillis?.let(::formatElapsed)
             ).joinToString(" · ")
             Text(details, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(end = 12.dp))

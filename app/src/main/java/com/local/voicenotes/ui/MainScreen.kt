@@ -14,10 +14,13 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -184,60 +187,85 @@ fun MainScreen(
         snackbarHost = { SnackbarHost(snackbar) },
         containerColor = MaterialTheme.colorScheme.surface
     ) { padding ->
-        Column(
-            Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).imePadding().verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp).padding(bottom = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            historyError?.let { HistoryErrorBanner(it, onRetry = viewModel::flushHistory) }
-
-            ConnectedToggleGroup(
-                options = Engine.entries,
-                selected = engine,
-                onSelect = viewModel::selectEngine,
-                enabled = !state.busy,
-                modifier = Modifier.fillMaxWidth()
-            ) { option, selected ->
-                Icon(
-                    if (option == Engine.LOCAL) AppIcons.Smartphone else AppIcons.Cloud,
-                    contentDescription = null, modifier = Modifier.size(20.dp)
-                )
-                Spacer(Modifier.width(8.dp))
-                Text(option.label, style = MaterialTheme.typography.titleMedium)
-                if (selected) Spacer(Modifier.width(2.dp))
-            }
-
-            AnimatedContent(
-                targetState = engine,
-                transitionSpec = { fadeIn() togetherWith fadeOut() },
-                label = "engineCard"
-            ) { shown ->
-                when (shown) {
-                    Engine.LOCAL -> LocalEngineCard(
-                        state, download,
-                        onDownload = ::startDownload,
-                        onCancelDownload = viewModel::cancelModelDownload,
-                        onOpenSettings = { showSettings = true }
+        val engineSection: @Composable () -> Unit = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                ConnectedToggleGroup(
+                    options = Engine.entries,
+                    selected = engine,
+                    onSelect = viewModel::selectEngine,
+                    enabled = !state.busy,
+                    modifier = Modifier.fillMaxWidth()
+                ) { option, _ ->
+                    Icon(
+                        if (option == Engine.LOCAL) AppIcons.Smartphone else AppIcons.Cloud,
+                        contentDescription = null, modifier = Modifier.size(20.dp)
                     )
-                    Engine.CLOUD -> CloudEngineCard(
-                        state, keyStatus,
-                        onEditKey = { showApiKeyDialog = true },
-                        onLanguage = viewModel::setLanguage
-                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(option.label, style = MaterialTheme.typography.titleMedium)
+                }
+                AnimatedContent(
+                    targetState = engine,
+                    transitionSpec = { fadeIn() togetherWith fadeOut() },
+                    label = "engineStatus"
+                ) { shown ->
+                    when (shown) {
+                        Engine.LOCAL -> LocalStatus(
+                            state, download,
+                            onDownload = ::startDownload,
+                            onCancelDownload = viewModel::cancelModelDownload,
+                            onOpenSettings = { showSettings = true }
+                        )
+                        Engine.CLOUD -> CloudStatus(
+                            state, keyStatus,
+                            onEditKey = { showApiKeyDialog = true }
+                        )
+                    }
                 }
             }
-
+        }
+        val audioSection: @Composable () -> Unit = {
             AudioCard(
                 state, shareHint,
                 onWhatsApp = { whatsAppPicker.launch(AUDIO_TYPES) },
                 onFiles = { audioPicker.launch(AUDIO_TYPES) }
             )
-
+        }
+        val transcriptSection: @Composable (Modifier, Boolean) -> Unit = { modifier, fill ->
             TranscriptCard(
                 state,
                 onEdit = viewModel::editTranscript,
-                onCopied = { scope.launch { snackbar.showSnackbar("Transcript copied") } }
+                onCopied = { scope.launch { snackbar.showSnackbar("Transcript copied") } },
+                modifier = modifier, fillHeight = fill
             )
+        }
+        BoxWithConstraints(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding).imePadding()) {
+            if (maxWidth >= 600.dp) {
+                // Unfolded foldables / tablets: controls left, transcript right.
+                Row(Modifier.fillMaxSize().padding(horizontal = 24.dp).padding(bottom = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+                    Column(
+                        Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        historyError?.let { HistoryErrorBanner(it, onRetry = viewModel::flushHistory) }
+                        engineSection()
+                        audioSection()
+                    }
+                    // The transcript fills the pane and scrolls inside its own text field.
+                    transcriptSection(Modifier.weight(1f).fillMaxHeight(), true)
+                }
+            } else {
+                Column(
+                    Modifier.fillMaxSize().verticalScroll(rememberScrollState())
+                        .padding(horizontal = 16.dp).padding(bottom = 16.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    historyError?.let { HistoryErrorBanner(it, onRetry = viewModel::flushHistory) }
+                    engineSection()
+                    audioSection()
+                    transcriptSection(Modifier.fillMaxWidth(), false)
+                }
+            }
         }
     }
 
@@ -268,48 +296,33 @@ fun MainScreen(
     }
 }
 
-// ---- Engine cards ---------------------------------------------------------------------------
+// ---- Engine status ---------------------------------------------------------------------------
+
+/** Quiet one-line explanation under the switch; no model names, no extra card. */
+@Composable
+private fun StatusCaption(icon: androidx.compose.ui.graphics.vector.ImageVector, text: String, busy: Boolean = false) {
+    Row(Modifier.padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        if (busy) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+        else Icon(icon, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+        Spacer(Modifier.width(8.dp))
+        Text(text, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
 
 @Composable
-private fun EngineCardSurface(content: @Composable () -> Unit) {
+private fun SetupCard(content: @Composable () -> Unit) {
     Card(
         shape = MaterialTheme.shapes.large,
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.primaryContainer,
+            contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+        ),
         modifier = Modifier.fillMaxWidth().animateContentSize()
-    ) { Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) { content() } }
+    ) { Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) { content() } }
 }
 
 @Composable
-private fun CardHeader(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, subtitle: String, primary: Boolean) {
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-        IconBadge(
-            icon,
-            container = if (primary) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.tertiaryContainer,
-            content = if (primary) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onTertiaryContainer
-        )
-        Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.titleLarge)
-            Text(subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-    }
-}
-
-/** Non-interactive label pill (an AssistChip would be announced as a button). */
-@Composable
-private fun InfoPill(icon: androidx.compose.ui.graphics.vector.ImageVector, text: String) {
-    Surface(shape = CircleShape, color = MaterialTheme.colorScheme.secondaryContainer,
-        contentColor = MaterialTheme.colorScheme.onSecondaryContainer) {
-        Row(Modifier.padding(horizontal = 12.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(icon, null, Modifier.size(16.dp))
-            Spacer(Modifier.width(6.dp))
-            Text(text, style = MaterialTheme.typography.labelLarge, maxLines = 1)
-        }
-    }
-}
-
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun LocalEngineCard(
+private fun LocalStatus(
     state: AppUiState,
     download: DownloadState,
     onDownload: () -> Unit,
@@ -317,52 +330,42 @@ private fun LocalEngineCard(
     onOpenSettings: () -> Unit
 ) {
     val local = bestLocalModel(state)
-    EngineCardSurface {
-        when {
-            download.active -> {
-                CardHeader(AppIcons.Download, "Downloading model", "Parakeet Ultra · on-device", primary = true)
-                DownloadProgress(download, onCancelDownload)
-            }
-            local != null -> {
-                val loading = state.progress is TranscriptionProgress.LoadingModel
-                CardHeader(
-                    AppIcons.Smartphone, "Parakeet Ultra",
-                    if (loading) "Loading the model…" else "Runs on this phone",
-                    primary = true
-                )
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    InfoPill(AppIcons.Shield, "Private")
-                    InfoPill(AppIcons.Translate, "Auto language")
-                    if (loading) CircularProgressIndicator(Modifier.padding(top = 6.dp).size(20.dp), strokeWidth = 2.dp)
+    when {
+        download.active -> SetupCard {
+            Text("Setting up on-device transcription", style = MaterialTheme.typography.titleMedium)
+            DownloadProgress(download, onCancelDownload)
+        }
+        local != null -> {
+            val loading = state.progress is TranscriptionProgress.LoadingModel
+            StatusCaption(
+                AppIcons.Shield,
+                if (loading) "Getting ready…" else "Private · on this phone · auto language",
+                busy = loading
+            )
+        }
+        else -> SetupCard {
+            Text("Set up on-device transcription", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "Works offline and keeps your voice notes on this phone. " +
+                    "One-time download of ${formatBytes(ParakeetUltraDownload.ENCODER_30S.sizeBytes)}; Wi-Fi recommended.",
+                style = MaterialTheme.typography.bodyMedium
+            )
+            (download as? DownloadState.Failed)?.let { failure ->
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Icon(Icons.Default.Warning, null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(18.dp))
+                    Text(failure.message, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
                 }
             }
-            else -> {
-                CardHeader(
-                    AppIcons.Download, "Get the on-device model",
-                    "Private transcription, no internet needed afterwards", primary = true
-                )
-                Text(
-                    "Parakeet Ultra understands German, English and many more languages. " +
-                        "One-time download of ${formatBytes(ParakeetUltraDownload.ENCODER_30S.sizeBytes)}; Wi-Fi recommended.",
-                    style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                (download as? DownloadState.Failed)?.let { failure ->
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Icon(Icons.Default.Warning, null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(18.dp))
-                        Text(failure.message, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
-                    }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Button(onClick = onDownload, modifier = Modifier.height(48.dp)) {
+                    Icon(
+                        if (download is DownloadState.Failed) Icons.Default.Refresh else AppIcons.Download,
+                        null, Modifier.size(ButtonDefaults.IconSize)
+                    )
+                    Spacer(Modifier.width(ButtonDefaults.IconSpacing))
+                    Text(if (download is DownloadState.Failed) "Retry download" else "Download")
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Button(onClick = onDownload, modifier = Modifier.height(48.dp)) {
-                        Icon(
-                            if (download is DownloadState.Failed) Icons.Default.Refresh else AppIcons.Download,
-                            null, Modifier.size(ButtonDefaults.IconSize)
-                        )
-                        Spacer(Modifier.width(ButtonDefaults.IconSpacing))
-                        Text(if (download is DownloadState.Failed) "Retry download" else "Download model")
-                    }
-                    TextButton(onClick = onOpenSettings) { Text("Import file") }
-                }
+                TextButton(onClick = onOpenSettings) { Text("Import file") }
             }
         }
     }
@@ -388,7 +391,7 @@ fun DownloadProgress(download: DownloadState, onCancel: () -> Unit) {
                         String.format(Locale.ROOT, "%.0f%%", running.fraction * 100)
                     else -> "Checking integrity…"
                 },
-                style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.weight(1f)
             )
             if (running != null) TextButton(onClick = onCancel) { Text("Cancel") }
@@ -398,15 +401,17 @@ fun DownloadProgress(download: DownloadState, onCancel: () -> Unit) {
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun CloudEngineCard(
+private fun CloudStatus(
     state: AppUiState,
     keyStatus: MistralApiKeyStatus?,
-    onEditKey: () -> Unit,
-    onLanguage: (LanguageOption) -> Unit
+    onEditKey: () -> Unit
 ) {
-    EngineCardSurface {
-        CardHeader(AppIcons.Cloud, "Mistral Voxtral", "Uploads audio to Mistral AI", primary = false)
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        StatusCaption(AppIcons.Cloud, "Uploads the audio to Mistral · auto language")
+        FlowRow(
+            Modifier.padding(horizontal = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
             when (keyStatus) {
                 null -> Text("Checking API key…", style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.padding(vertical = 14.dp))
@@ -427,26 +432,6 @@ private fun CloudEngineCard(
                     Spacer(Modifier.width(ButtonDefaults.IconSpacing))
                     Text("Add API key")
                 }
-            }
-            LanguageChip(state.language, enabled = !state.busy, onLanguage = onLanguage)
-        }
-    }
-}
-
-@Composable
-fun LanguageChip(language: LanguageOption, enabled: Boolean, onLanguage: (LanguageOption) -> Unit) {
-    var expanded by remember { mutableStateOf(false) }
-    Box {
-        AssistChip(
-            onClick = { expanded = true }, enabled = enabled,
-            label = { Text(language.label) },
-            leadingIcon = { Icon(AppIcons.Translate, null, Modifier.size(AssistChipDefaults.IconSize)) },
-            trailingIcon = { Icon(Icons.Default.ArrowDropDown, null, Modifier.size(AssistChipDefaults.IconSize)) },
-            modifier = Modifier.semantics { contentDescription = "Language: ${language.label}" }
-        )
-        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            LanguageOption.entries.forEach { option ->
-                DropdownMenuItem(text = { Text(option.label) }, onClick = { onLanguage(option); expanded = false })
             }
         }
     }
@@ -480,15 +465,17 @@ private fun AudioCard(state: AppUiState, shareHint: String?, onWhatsApp: () -> U
             }
             Waveform(animated = state.busy, modifier = Modifier.fillMaxWidth().height(if (hasAudio) 36.dp else 48.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilledTonalButton(onClick = onWhatsApp, enabled = !state.busy, modifier = Modifier.weight(1f).height(48.dp)) {
+                FilledTonalButton(onClick = onWhatsApp, enabled = !state.busy, modifier = Modifier.weight(1f).height(48.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp)) {
                     Icon(AppIcons.Chat, null, Modifier.size(ButtonDefaults.IconSize))
                     Spacer(Modifier.width(ButtonDefaults.IconSpacing))
-                    Text("WhatsApp")
+                    Text("WhatsApp", maxLines = 1, softWrap = false)
                 }
-                OutlinedButton(onClick = onFiles, enabled = !state.busy, modifier = Modifier.weight(1f).height(48.dp)) {
+                OutlinedButton(onClick = onFiles, enabled = !state.busy, modifier = Modifier.weight(1f).height(48.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp)) {
                     Icon(AppIcons.Folder, null, Modifier.size(ButtonDefaults.IconSize))
                     Spacer(Modifier.width(ButtonDefaults.IconSpacing))
-                    Text("Files")
+                    Text("Files", maxLines = 1, softWrap = false)
                 }
             }
             shareHint?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary) }
@@ -499,15 +486,19 @@ private fun AudioCard(state: AppUiState, shareHint: String?, onWhatsApp: () -> U
 // ---- Transcript ------------------------------------------------------------------------
 
 @Composable
-private fun TranscriptCard(state: AppUiState, onEdit: (String) -> Unit, onCopied: () -> Unit) {
+private fun TranscriptCard(
+    state: AppUiState, onEdit: (String) -> Unit, onCopied: () -> Unit,
+    modifier: Modifier = Modifier, fillHeight: Boolean = false
+) {
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
     Card(
         shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
-        modifier = Modifier.fillMaxWidth()
+        modifier = modifier
     ) {
-        Column(Modifier.padding(start = 20.dp, end = 8.dp, top = 8.dp, bottom = 20.dp)) {
+        Column(Modifier.then(if (fillHeight) Modifier.fillMaxSize() else Modifier)
+            .padding(start = 20.dp, end = 8.dp, top = 8.dp, bottom = 20.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("Transcript", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
                 val hasText = state.transcript.isNotBlank()
@@ -524,6 +515,7 @@ private fun TranscriptCard(state: AppUiState, onEdit: (String) -> Unit, onCopied
             BasicTextField(
                 value = state.transcript, onValueChange = onEdit,
                 modifier = Modifier.fillMaxWidth().padding(end = 12.dp).heightIn(min = 140.dp)
+                    .then(if (fillHeight) Modifier.weight(1f) else Modifier)
                     .semantics { contentDescription = "Transcript" },
                 textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
                 cursorBrush = androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.primary),

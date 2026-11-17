@@ -121,12 +121,12 @@ fun SettingsSheet(
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                         IconBadge(AppIcons.Smartphone, MaterialTheme.colorScheme.primaryContainer, MaterialTheme.colorScheme.onPrimaryContainer)
                         Column(Modifier.weight(1f)) {
-                            Text("Parakeet Ultra", style = MaterialTheme.typography.titleMedium)
+                            Text("Speech model", style = MaterialTheme.typography.titleMedium)
                             Text(
                                 when {
                                     download.active -> "Downloading…"
-                                    downloaded != null -> "Downloaded · ${formatBytes(downloaded.sizeBytes)}"
-                                    imported.isNotEmpty() -> "Using imported file ${imported.first().displayName}"
+                                    downloaded != null -> "Installed · ${formatBytes(downloaded.sizeBytes)}"
+                                    imported.isNotEmpty() -> "Installed from a file"
                                     else -> "Not installed"
                                 },
                                 style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -158,10 +158,6 @@ fun SettingsSheet(
                         onClick = { modelPicker.launch(arrayOf("application/octet-stream", "*/*")) },
                         enabled = !state.busy
                     ) { Text("Import .tflite file instead") }
-                    state.models.filter { !it.enabled && !it.isCloud() }.forEach { stale ->
-                        Text("${stale.displayName}: ${stale.note}", style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
                 }
             }
 
@@ -184,14 +180,6 @@ fun SettingsSheet(
                     trailingContent = { Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null) },
                     colors = ListItemDefaults.colors(containerColor = Color.Transparent),
                     modifier = Modifier.clickable(enabled = !state.busy, onClickLabel = "Change Mistral API key", onClick = onEditKey)
-                )
-                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceContainerLow)
-                ListItem(
-                    headlineContent = { Text("Language") },
-                    supportingContent = { Text("Cloud only") },
-                    leadingContent = { Icon(AppIcons.Translate, null) },
-                    trailingContent = { LanguageChip(state.language, enabled = !state.busy, onLanguage = viewModel::setLanguage) },
-                    colors = ListItemDefaults.colors(containerColor = Color.Transparent)
                 )
             }
 

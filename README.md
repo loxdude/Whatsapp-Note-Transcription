@@ -10,7 +10,7 @@ The APK does not include the encoder: tap **Download model** once (665 MB, verif
 - Decodes Ogg Opus directly with bundled libopus/libopusfile; other formats use Android MediaCodec.
 - Runs Parakeet Ultra (30/20/10 s windows) on the CPU without a network connection.
 - Offers `voxtral-mini-latest` as an online alternative.
-- Supports automatic language detection and 12 named languages: German, English, Spanish, French, Italian, Portuguese, Dutch, Polish, Turkish, Japanese, Korean, and Chinese.
+- Detects the spoken language automatically (both engines).
 - Keeps the transcript editable and provides a copy button.
 - Shows model loading, audio decoding, transcription progress, elapsed time, cancellation, and errors.
 - Remembers the selected audio and model between launches.
@@ -23,11 +23,12 @@ Local decoding accepts up to 15 minutes of audio. The Mistral path uploads the s
 Material 3 with Material You: colours follow the wallpaper (switchable to a built-in green palette), and the theme follows the system or is forced to light/dark in settings.
 
 - **Local / Cloud switch** at the top. Local runs Parakeet Ultra on the phone; Cloud uses Mistral Voxtral. Choosing Local without an installed model selects nothing, so audio is never uploaded while the switch says Local.
-- **Engine card** below it: model status for Local (with the one-tap download when no model is installed), API-key status and language for Cloud.
+- A one-line status under the switch (private/on this phone, or uploads to Mistral, both with automatic language detection). A setup card with the one-tap download appears only while no local model is installed; Cloud shows the API-key status. There is no language picker: both engines detect the language.
 - **Audio card** with WhatsApp and Files pickers; a waveform animates while work runs.
 - **Transcript card**: editable, with copy and share.
 - **Bottom bar**: the large Transcribe button, stage/percent/elapsed progress, Cancel, and the finished/failed status.
-- **Settings sheet**: appearance, on-device model (download, remove, import), Mistral API key and language, about/licences.
+- **Settings sheet**: appearance, on-device model (download, remove, import), Mistral API key, about/licences.
+- **Unfolded foldables / tablets** (≥ 600 dp): two panes, controls left and a full-height transcript right.
 - **History**: collapsing app bar, search, Local/Cloud badges, copy/share/delete.
 
 The screen stays awake while a transcription is running. A cancel button appears during active work. UI and notification Cancel use the same process-owned authority, including shares still waiting for metadata or model loading; cancelling these releases their foreground-service reservation immediately.
