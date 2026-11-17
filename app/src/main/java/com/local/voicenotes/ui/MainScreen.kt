@@ -165,9 +165,21 @@ fun MainScreen(
         val metered = context.getSystemService(ConnectivityManager::class.java)?.isActiveNetworkMetered == true
         if (metered) confirmMeteredDownload = true else viewModel.downloadModel()
     }
+    // A tap while the model is still being prepared starts the transcription right after.
+    var pendingTranscribe by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(pendingTranscribe, state.busy) {
+        if (pendingTranscribe && !state.busy) {
+            pendingTranscribe = false
+            if (state.canTranscribe && viewModel.transcribe()) onWorkStarted()
+        }
+    }
+    fun startOrQueue() {
+        if (state.progress is TranscriptionProgress.LoadingModel) pendingTranscribe = true
+        else if (viewModel.transcribe()) onWorkStarted()
+    }
     fun transcribe() {
         if (engine == Engine.CLOUD && !cloudConsent) showCloudConsent = true
-        else if (viewModel.transcribe()) onWorkStarted()
+        else startOrQueue()
     }
 
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
@@ -203,7 +215,7 @@ fun MainScreen(
                     options = Engine.entries,
                     selected = engine,
                     onSelect = viewModel::selectEngine,
-                    enabled = !state.busy,
+                    enabled = !state.working,
                     modifier = Modifier.fillMaxWidth()
                 ) { option, _ ->
                     Icon(
@@ -301,7 +313,7 @@ fun MainScreen(
             onConfirm = {
                 showCloudConsent = false
                 viewModel.grantCloudUploadConsent()
-                if (viewModel.transcribe()) onWorkStarted()
+                startOrQueue()
             },
             onDismiss = { showCloudConsent = false }
         )
@@ -430,7 +442,7 @@ private fun AudioCard(state: AppUiState, shareHint: String?, onWhatsApp: () -> U
                     Column(Modifier.weight(1f)) {
                         Text(state.audioName, style = MaterialTheme.typography.titleMedium, maxLines = 2,
                             overflow = TextOverflow.Ellipsis)
-                        Text(if (state.busy) "Working on it…" else "Voice note",
+                        Text("Voice note",
                             style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
@@ -439,15 +451,15 @@ private fun AudioCard(state: AppUiState, shareHint: String?, onWhatsApp: () -> U
                 Text("Or share one from WhatsApp and choose Transcribe.",
                     style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Waveform(animated = state.busy, modifier = Modifier.fillMaxWidth().height(if (hasAudio) 36.dp else 48.dp))
+            Waveform(animated = rememberSettledWork(state), modifier = Modifier.fillMaxWidth().height(if (hasAudio) 36.dp else 48.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilledTonalButton(onClick = onWhatsApp, enabled = !state.busy, modifier = Modifier.weight(1f).height(48.dp),
+                FilledTonalButton(onClick = onWhatsApp, enabled = !state.working, modifier = Modifier.weight(1f).height(48.dp),
                     contentPadding = PaddingValues(horizontal = 12.dp)) {
                     Icon(AppIcons.Chat, null, Modifier.size(ButtonDefaults.IconSize))
                     Spacer(Modifier.width(ButtonDefaults.IconSpacing))
                     Text("WhatsApp", maxLines = 1, softWrap = false)
                 }
-                OutlinedButton(onClick = onFiles, enabled = !state.busy, modifier = Modifier.weight(1f).height(48.dp),
+                OutlinedButton(onClick = onFiles, enabled = !state.working, modifier = Modifier.weight(1f).height(48.dp),
                     contentPadding = PaddingValues(horizontal = 12.dp)) {
                     Icon(AppIcons.Folder, null, Modifier.size(ButtonDefaults.IconSize))
                     Spacer(Modifier.width(ButtonDefaults.IconSpacing))
@@ -499,7 +511,7 @@ private fun TranscriptCard(
                     Box {
                         if (state.transcript.isBlank()) {
                             Text(
-                                if (state.busy) "Listening closely…" else "Your words will appear here. You can edit them afterwards.",
+                                "Your words will appear here. You can edit them afterwards.",
                                 style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
@@ -520,10 +532,12 @@ private fun ActionBar(state: AppUiState, engine: Engine, onTranscribe: () -> Uni
             Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 16.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            StatusLine(state, engine)
+            // Short runs (most notes take well under a second to start) show no progress UI.
+            val settled = rememberSettledWork(state)
+            StatusLine(state, engine, settled)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Button(
-                    onClick = onTranscribe, enabled = state.canTranscribe,
+                    onClick = onTranscribe, enabled = state.canRequestTranscription,
                     shape = CircleShape, modifier = Modifier.weight(1f).height(60.dp),
                     contentPadding = ButtonDefaults.ButtonWithIconContentPadding
                 ) {
@@ -531,14 +545,14 @@ private fun ActionBar(state: AppUiState, engine: Engine, onTranscribe: () -> Uni
                     Spacer(Modifier.width(10.dp))
                     Text(
                         when {
-                            state.busy -> "Working…"
+                            settled -> "Working…"
                             state.transcript.isNotBlank() -> "Transcribe again"
                             else -> "Transcribe"
                         },
                         style = MaterialTheme.typography.titleMedium
                     )
                 }
-                AnimatedVisibility(visible = state.busy) {
+                AnimatedVisibility(visible = settled) {
                     OutlinedButton(onClick = onCancel, shape = CircleShape, modifier = Modifier.height(60.dp)) {
                         Icon(Icons.Default.Close, null, Modifier.size(ButtonDefaults.IconSize))
                         Spacer(Modifier.width(ButtonDefaults.IconSpacing))
@@ -551,8 +565,9 @@ private fun ActionBar(state: AppUiState, engine: Engine, onTranscribe: () -> Uni
 }
 
 @Composable
-private fun StatusLine(state: AppUiState, engine: Engine) {
+private fun StatusLine(state: AppUiState, engine: Engine, settled: Boolean) {
     val progress = state.progress
+    if (state.busy && !settled) return
     val (label, fraction) = when (progress) {
         is TranscriptionProgress.Importing -> "Importing model" to progress.fraction
         TranscriptionProgress.Preparing -> "Preparing" to null

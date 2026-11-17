@@ -24,7 +24,12 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
@@ -90,6 +95,30 @@ fun <T> ConnectedToggleGroup(
         }
     }
 }
+
+/**
+ * True once [busy] has lasted [delayMillis]; false again as soon as it ends. Most runs take a
+ * few hundred milliseconds, and showing progress UI for those only produces a flash.
+ */
+@Composable
+fun rememberSettledBusy(busy: Boolean, delayMillis: Long = 600): Boolean {
+    var settled by remember { mutableStateOf(false) }
+    LaunchedEffect(busy, delayMillis) {
+        if (busy) { delay(delayMillis); settled = true } else settled = false
+    }
+    return busy && settled
+}
+
+/**
+ * Settled busy for the app state: preparing a model after an engine switch (about a second) is
+ * not work the user started and stays invisible unless it really takes long.
+ */
+@Composable
+fun rememberSettledWork(state: com.local.voicenotes.AppUiState): Boolean =
+    rememberSettledBusy(
+        state.busy,
+        if (state.progress is com.local.voicenotes.domain.TranscriptionProgress.LoadingModel) 2_500 else 600
+    )
 
 /** Icon on a tinted circle, used as the leading visual of cards. */
 @Composable

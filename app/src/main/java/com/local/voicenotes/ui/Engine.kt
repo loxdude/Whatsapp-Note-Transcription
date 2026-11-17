@@ -8,6 +8,15 @@ import com.local.voicenotes.model.ParakeetUltraDownload
 /** The two user-facing transcription engines: Parakeet Ultra on device, or Mistral in the cloud. */
 enum class Engine(val label: String) { LOCAL("Local"), CLOUD("Cloud") }
 
+/** Work the user started (import or transcription); model preparation alone is not. */
+val AppUiState.working: Boolean
+    get() = busy && progress !is com.local.voicenotes.domain.TranscriptionProgress.LoadingModel
+
+/** Transcribe may be tapped while the selected model is still being prepared; it starts afterwards. */
+val AppUiState.canRequestTranscription: Boolean
+    get() = canTranscribe || (progress is com.local.voicenotes.domain.TranscriptionProgress.LoadingModel &&
+        audioUri != null && selectedModel?.enabled == true)
+
 /** The switch reflects the actual selection; no selection (no local model yet) reads as Local. */
 fun engineOf(state: AppUiState): Engine = if (state.selectedModel?.isCloud() == true) Engine.CLOUD else Engine.LOCAL
 
