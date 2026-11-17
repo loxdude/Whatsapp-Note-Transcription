@@ -1,6 +1,7 @@
 package com.local.voicenotes.inference
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -41,10 +42,20 @@ class CohereSupportTest {
         p.start(0)
         assertEquals(0.01f, p.fraction(0), 1e-4f)
         assertEquals(0.5f, p.fraction(5_000), 1e-3f)
-        assertEquals(0.95f, p.fraction(60_000), 1e-3f)
+        val late = p.fraction(15_000)
+        assertTrue(late > 0.85f && late < p.fraction(20_000) && p.fraction(20_000) < 0.95f)
+        assertEquals(0.95f, p.fraction(120_000), 1e-3f)
         p.window(1, 1, 9_000)
         assertEquals(1f, p.fraction(9_000), 0f)
         assertEquals(450L, p.measured())
+    }
+
+    @Test fun progressWeightsTheShortLastWindowByItsLength() {
+        val p = CohereProgressEstimate(samples = 16_000 * 36, msPerSecond = 100) // 30 s + 6 s
+        p.start(0)
+        assertEquals(0.5f * 30 / 36, p.fraction(1_500), 1e-3f)
+        p.window(1, 2, 3_000)
+        assertEquals(30f / 36, p.fraction(3_000), 1e-3f)
     }
 
     @Test fun progressCountsFinishedWindows() {

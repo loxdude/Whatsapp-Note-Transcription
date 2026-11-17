@@ -83,10 +83,23 @@ class CohereProgressEstimate(private val samples: Int, private val msPerSecond: 
         if (startedAt < 0) return 0f
         val windows = if (total > 0) total else maxOf(1, (samples + 30 * SAMPLE_RATE - 1) / (30 * SAMPLE_RATE))
         if (done >= windows) return 1f
-        val windowSeconds = samples.toFloat() / SAMPLE_RATE / windows
-        val expectedMs = (windowSeconds * msPerSecond).coerceAtLeast(500f)
-        val inWindow = ((nowMs - windowStartedAt) / expectedMs).coerceIn(0f, 0.95f)
-        return ((done + inWindow) / windows).coerceIn(0.01f, 1f)
+        // Windows are 30 s except the last one, so weight each by its audio length.
+        val window = 30f * SAMPLE_RATE
+        val doneSamples = minOf(samples.toFloat(), done * window)
+        val currentSamples = minOf(window, samples - doneSamples).coerceAtLeast(1f)
+        val expectedMs = (currentSamples / SAMPLE_RATE * msPerSecond).coerceAtLeast(500f)
+        val inWindow = creep((nowMs - windowStartedAt) / expectedMs)
+        return ((doneSamples + inWindow * currentSamples) / samples).coerceIn(0.01f, 1f)
+    }
+
+    /**
+     * Linear up to 80 % of the expected window time, then approaches 95 % ever more slowly, so
+     * a phone slower than the estimate still sees the bar move instead of a frozen value.
+     */
+    private fun creep(ratio: Float): Float {
+        if (ratio <= 0f) return 0f
+        if (ratio <= 0.8f) return ratio
+        return 0.95f - 0.15f * kotlin.math.exp(-(ratio - 0.8f) / 1.5f)
     }
 
     /** Compute ms per audio second of the finished run, or null if it did not finish. */

@@ -12,7 +12,9 @@ import org.junit.Test
 class TranslationTextTest {
     @Test fun promptNamesTheTargetLanguage() {
         assertEquals(
-            "Translate the following text into English. Output only the translation, nothing else.\n\nمرحبا",
+            "You are a translator. Translate the text between the markers into English. " +
+                "Write the whole answer in English, even if the text mentions other languages. " +
+                "Output only the translation.\n\n<<<\nمرحبا\n>>>",
             TranslationText.prompt("مرحبا", "English")
         )
     }

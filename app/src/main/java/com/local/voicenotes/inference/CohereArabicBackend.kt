@@ -27,14 +27,30 @@ import kotlin.coroutines.coroutineContext
  * Cancellation is checked between 30 s windows, so a cancelled run may keep the CPU busy for
  * up to one window; its result is discarded.
  */
-class CohereArabicBackend(private val threads: () -> Int) : TranscriptionBackend {
+class CohereArabicBackend(
+    private val threads: () -> Int,
+    /** Persisted speed of this phone (ms of compute per audio second), for the progress bar. */
+    private val speedStore: SpeedStore = SpeedStore.InMemory
+) : TranscriptionBackend {
+    interface SpeedStore {
+        fun load(): Long?
+        fun save(msPerSecond: Long)
+
+        object InMemory : SpeedStore {
+            @Volatile private var value: Long? = null
+            override fun load() = value
+            override fun save(msPerSecond: Long) { value = msPerSecond }
+        }
+    }
+
     private companion object { const val TAG = "VoiceNotesCohere" }
 
     private val executor = Executors.newSingleThreadExecutor { Thread(it, "CohereArabic") }
     private val dispatcher = executor.asCoroutineDispatcher()
 
     /** Measured compute time per second of audio on this phone; starts with a mid-range guess. */
-    @Volatile private var msPerSecond = CohereProgressEstimate.DEFAULT_MS_PER_SECOND
+    @Volatile private var msPerSecond =
+        speedStore.load()?.takeIf { it in 50L..5_000L } ?: CohereProgressEstimate.DEFAULT_MS_PER_SECOND
 
     // Touched only on the executor thread.
     private var handle = 0L
@@ -100,7 +116,7 @@ class CohereArabicBackend(private val threads: () -> Int) : TranscriptionBackend
         } catch (error: OutOfMemoryError) {
             throw IllegalStateException("Not enough memory for Arabic transcription.", error)
         }
-        estimate.measured()?.let { msPerSecond = it }
+        estimate.measured()?.let { msPerSecond = it; speedStore.save(it) }
         if (bytes == null || !job.isActive) throw CancellationException("Transcription cancelled.")
         val text = CohereText.clean(String(bytes, Charsets.UTF_8))
         Log.i(TAG, "transcribe samples=${pcm16KhzMono.size} total=${SystemClock.elapsedRealtime() - started}ms")

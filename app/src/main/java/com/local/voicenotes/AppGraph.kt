@@ -79,7 +79,14 @@ class AppGraph(private val app: VoiceNotesApplication) {
     private val repository = ModelRepository(app)
     private val decoder = AndroidAudioDecoder(app.contentResolver)
     private val liteRtBackend = LiteRtParakeetBackend(app)
-    private val cohereBackend = CohereArabicBackend { CpuCores.inferenceThreads(CpuCores.readMaxFreqsKhz()) }
+    private val cohereBackend = CohereArabicBackend(
+        threads = { CpuCores.inferenceThreads(CpuCores.readMaxFreqsKhz()) },
+        speedStore = object : CohereArabicBackend.SpeedStore {
+            private val prefs = app.getSharedPreferences("cohere_speed", 0)
+            override fun load(): Long? = prefs.getLong("ms_per_second", -1L).takeIf { it > 0 }
+            override fun save(msPerSecond: Long) { prefs.edit().putLong("ms_per_second", msPerSecond).apply() }
+        }
+    )
     val mistralApiKeyStore = MistralApiKeyStore(app)
     private val mistralBackend = MistralTranscriptionBackend(app, mistralApiKeyStore)
 

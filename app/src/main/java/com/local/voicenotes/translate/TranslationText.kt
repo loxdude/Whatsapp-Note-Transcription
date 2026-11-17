@@ -4,9 +4,15 @@ import com.local.voicenotes.model.TranslationSettings
 
 /** Pure text rules of the on-demand translation, kept Android-free for unit tests. */
 object TranslationText {
-    /** Source-agnostic: transcripts can come from Parakeet, the Arabic model or Mistral. */
+    /**
+     * Source-agnostic: transcripts can come from Parakeet, the Arabic model or Mistral. The
+     * markers and the "even if" sentence stop E2B from answering in another language when the
+     * text talks about one (it once "translated" an Arabic note about Standard Arabic into it).
+     */
     fun prompt(text: String, language: String): String =
-        "Translate the following text into $language. Output only the translation, nothing else.\n\n$text"
+        "You are a translator. Translate the text between the markers into $language. " +
+            "Write the whole answer in $language, even if the text mentions other languages. " +
+            "Output only the translation.\n\n<<<\n$text\n>>>"
 
     const val MAX_LANGUAGE_CHARS = 40
 
