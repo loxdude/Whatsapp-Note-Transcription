@@ -12,6 +12,7 @@ import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.local.voicenotes.AppUiState
 import com.local.voicenotes.appGraph
+import com.local.voicenotes.model.DownloadState
 import com.local.voicenotes.voiceNotesApp
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -99,21 +100,22 @@ class TranscriptionService : Service() {
         appGraph.workServiceInForeground = true
         if (observer == null) {
             observer = scope.launch {
-                combine(appGraph.coordinator.state, appGraph.shareReservations) { state, reserved -> state to (reserved > 0) }
-                    .collect { (state, reserved) -> onState(state, reserved) }
+                combine(appGraph.coordinator.state, appGraph.shareReservations, appGraph.modelDownload) { state, reserved, download ->
+                    Triple(state, reserved > 0, download)
+                }.collect { (state, reserved, download) -> onState(state, reserved, download) }
             }
         }
         // Render the current state now: if work started and ended since the last start, the
         // observer sees no new value and the placeholder above would otherwise stay.
-        onState(appGraph.coordinator.state.value, appGraph.shareReservations.value > 0)
+        onState(appGraph.coordinator.state.value, appGraph.shareReservations.value > 0, appGraph.modelDownload.value)
         return START_NOT_STICKY
     }
 
     private fun currentNotice(): OngoingNotice? =
-        WorkNotificationPolicy.ongoing(appGraph.coordinator.state.value, appGraph.shareReservations.value > 0)
+        WorkNotificationPolicy.ongoing(appGraph.coordinator.state.value, appGraph.shareReservations.value > 0, appGraph.modelDownload.value)
 
-    private fun onState(state: AppUiState, shareReserved: Boolean) {
-        val notice = WorkNotificationPolicy.ongoing(state, shareReserved)
+    private fun onState(state: AppUiState, shareReserved: Boolean, download: DownloadState) {
+        val notice = WorkNotificationPolicy.ongoing(state, shareReserved, download)
         if (notice != null) {
             lastKind = notice.kind
             if (inForeground && notice != shownNotice) {
@@ -125,7 +127,7 @@ class TranscriptionService : Service() {
             }
             return
         }
-        val finished = WorkNotificationPolicy.finished(lastKind, state)
+        val finished = WorkNotificationPolicy.finished(lastKind, state, download)
         lastKind = null
         if (finished != null && !voiceNotesApp.isInForeground) {
             WorkNotifications.postFinished(this, finished)
@@ -147,7 +149,7 @@ class TranscriptionService : Service() {
     /** API 35 time limit for dataSync/mediaProcessing (6 h): cancel and stop promptly. */
     override fun onTimeout(startId: Int, fgsType: Int) {
         Log.w(TAG, "Foreground service time limit reached; cancelling work")
-        appGraph.cancelWork()
+        appGraph.cancelAll()
         leaveForeground()
         stopSelfResult(latestStartId)
     }

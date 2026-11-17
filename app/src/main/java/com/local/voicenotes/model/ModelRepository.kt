@@ -179,6 +179,36 @@ class ModelRepository(private val context: Context) {
         }
     }
 
+    /** Persists the verified, app-private encoder written by [ModelDownload]. */
+    suspend fun registerDownloaded(file: File, spec: DownloadSpec): ImportedModel = withContext(Dispatchers.IO) {
+        val evaluation = ParakeetUltraModels.evaluate(spec.fileName)
+        val model = ImportedModel(
+            id = ParakeetUltraDownload.MODEL_ID,
+            displayName = spec.fileName,
+            path = file.absolutePath,
+            sizeBytes = spec.sizeBytes,
+            architecture = evaluation.architecture,
+            backend = evaluation.backend,
+            enabled = evaluation.enabled,
+            note = evaluation.note
+        )
+        context.modelDataStore.edit { prefs ->
+            val stored = rawRecords(prefs[modelsKey].orEmpty())
+            val updated = ModelRecords.mergeImport(stored, ::recordId, encodeRecord(model), model.id)
+            prefs[modelsKey] = JSONArray().apply { updated.forEach { put(it) } }.toString()
+        }
+        model
+    }
+
+    /** Removes the record [id] (the caller deletes any app-private file). */
+    suspend fun remove(id: String) = withContext(Dispatchers.IO) {
+        context.modelDataStore.edit { prefs ->
+            val kept = rawRecords(prefs[modelsKey].orEmpty()).filterNot { recordId(it) == id }
+            prefs[modelsKey] = JSONArray().apply { kept.forEach { put(it) } }.toString()
+            if (prefs[selectedKey] == id) prefs.remove(selectedKey)
+        }
+    }
+
     private fun rawRecords(value: String): List<Any?> {
         if (value.isBlank()) return emptyList()
         val array = runCatching { JSONArray(value) }.getOrNull() ?: return emptyList()

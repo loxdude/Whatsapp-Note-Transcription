@@ -2,12 +2,15 @@ package com.local.voicenotes.work
 
 import com.local.voicenotes.AppUiState
 import com.local.voicenotes.domain.TranscriptionProgress
+import com.local.voicenotes.model.DownloadState
 import kotlin.math.roundToInt
 
 enum class WorkKind {
     IMPORT, TRANSCRIPTION,
     /** Audio was shared to the app; the service is held until its transcription can start. */
-    SHARE
+    SHARE,
+    /** The on-device model is being downloaded. */
+    DOWNLOAD
 }
 
 /** Content of the ongoing foreground-service notification. [percent] null = indeterminate. */
@@ -33,13 +36,27 @@ data class FinishedNotice(val title: String, val text: String)
 object WorkNotificationPolicy {
     const val PREVIEW_CHARS = 120
 
-    fun shouldRun(state: AppUiState, shareReserved: Boolean = false): Boolean = ongoing(state, shareReserved) != null
+    fun shouldRun(state: AppUiState, shareReserved: Boolean = false, download: DownloadState = DownloadState.Idle): Boolean =
+        ongoing(state, shareReserved, download) != null
 
-    /** Null when no foreground work is running, i.e. the service should stop. */
-    fun ongoing(state: AppUiState, shareReserved: Boolean = false): OngoingNotice? =
-        work(state) ?: if (shareReserved) {
+    /**
+     * Null when no foreground work is running, i.e. the service should stop. A transcription
+     * takes precedence in the notification over a parallel model download.
+     */
+    fun ongoing(state: AppUiState, shareReserved: Boolean = false, download: DownloadState = DownloadState.Idle): OngoingNotice? =
+        work(state) ?: downloadNotice(download) ?: if (shareReserved) {
             OngoingNotice(WorkKind.SHARE, "Shared voice note", "Getting ready to transcribe", null)
         } else null
+
+    private fun downloadNotice(download: DownloadState): OngoingNotice? = when (download) {
+        is DownloadState.Running -> OngoingNotice(
+            WorkKind.DOWNLOAD, "Downloading on-device model",
+            "${download.downloadedBytes / 1_000_000} of ${download.totalBytes / 1_000_000} MB",
+            percent(download.fraction)
+        )
+        DownloadState.Verifying -> OngoingNotice(WorkKind.DOWNLOAD, "Downloading on-device model", "Checking integrity", null)
+        else -> null
+    }
 
     private fun work(state: AppUiState): OngoingNotice? = when (val progress = state.progress) {
         is TranscriptionProgress.Importing ->
@@ -59,7 +76,7 @@ object WorkNotificationPolicy {
      * Cancellation is the user's own action and gets no notice; neither does a successful
      * model import (the user is in the app's settings when starting it).
      */
-    fun finished(lastKind: WorkKind?, state: AppUiState): FinishedNotice? = when (lastKind) {
+    fun finished(lastKind: WorkKind?, state: AppUiState, download: DownloadState = DownloadState.Idle): FinishedNotice? = when (lastKind) {
         null -> null
         WorkKind.TRANSCRIPTION -> when (val progress = state.progress) {
             is TranscriptionProgress.Completed -> FinishedNotice(
@@ -73,6 +90,13 @@ object WorkNotificationPolicy {
             ?.let { FinishedNotice("Model import failed", it.message) }
         // Nothing was started (e.g. no usable model): the main screen explains it.
         WorkKind.SHARE -> null
+        WorkKind.DOWNLOAD -> when (download) {
+            is DownloadState.Failed -> FinishedNotice("Model download failed", download.message)
+            DownloadState.Idle -> if (state.models.any { it.id == com.local.voicenotes.model.ParakeetUltraDownload.MODEL_ID }) {
+                FinishedNotice("On-device model ready", "Voice notes are now transcribed on this phone.")
+            } else null
+            else -> null
+        }
     }
 
     /** Lock-screen version of an ongoing notice: progress only, no audio file name. */
@@ -81,6 +105,7 @@ object WorkNotificationPolicy {
             WorkKind.IMPORT -> "Importing model"
             WorkKind.TRANSCRIPTION -> "Transcribing voice note"
             WorkKind.SHARE -> "Shared voice note"
+            WorkKind.DOWNLOAD -> "Downloading on-device model"
         }
     )
 

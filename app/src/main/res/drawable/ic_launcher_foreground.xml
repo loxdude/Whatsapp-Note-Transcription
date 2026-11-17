@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 108dp adaptive-icon canvas; artwork stays inside the 66dp safe zone (21..87). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M31,48a3,3 0,0 1,6 0v12a3,3 0,0 1,-6 0zM41,38a3,3 0,0 1,6 0v32a3,3 0,0 1,-6 0zM51,30a3,3 0,0 1,6 0v48a3,3 0,0 1,-6 0zM61,40a3,3 0,0 1,6 0v28a3,3 0,0 1,-6 0zM71,47a3,3 0,0 1,6 0v14a3,3 0,0 1,-6 0z" />
+</vector>

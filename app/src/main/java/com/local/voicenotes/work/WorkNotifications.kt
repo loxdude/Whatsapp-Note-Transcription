@@ -118,6 +118,6 @@ object WorkNotifications {
 class CancelWorkReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         // Also retire pending shares while the coordinator is still Idle.
-        context.appGraph.cancelWork()
+        context.appGraph.cancelAll()
     }
 }

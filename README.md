@@ -2,7 +2,7 @@
 
 Voice Note Transcriber is an Android app that turns audio files into editable text. It runs Parakeet Ultra on the phone's CPU through LiteRT, or sends the original audio file to Mistral's Voxtral Mini API.
 
-The app does not include the encoder. Import a Parakeet Ultra encoder `.tflite` after installation. The small Parakeet Ultra mel front ends and decoder (about 24 MB) are bundled in the APK.
+The APK does not include the encoder: tap **Download model** once (665 MB, verified by SHA-256) or import an encoder file. The small Parakeet Ultra mel front ends and decoder (about 24 MB) are bundled in the APK.
 
 ## What it does
 
@@ -18,9 +18,17 @@ The app does not include the encoder. Import a Parakeet Ultra encoder `.tflite` 
 
 Local decoding accepts up to 15 minutes of audio. The Mistral path uploads the selected source file instead of decoding it on the phone.
 
-## Current interface
+## Interface
 
-The main screen now keeps the audio picker, current backend, language, progress, and transcription button in one card. The transcript fills the rest of the screen and can be edited or copied. Model import, language selection, and the Mistral API key are in the settings sheet.
+Material 3 with Material You: colours follow the wallpaper (switchable to a built-in green palette), and the theme follows the system or is forced to light/dark in settings.
+
+- **Local / Cloud switch** at the top. Local runs Parakeet Ultra on the phone; Cloud uses Mistral Voxtral. Choosing Local without an installed model selects nothing, so audio is never uploaded while the switch says Local.
+- **Engine card** below it: model status for Local (with the one-tap download when no model is installed), API-key status and language for Cloud.
+- **Audio card** with WhatsApp and Files pickers; a waveform animates while work runs.
+- **Transcript card**: editable, with copy and share.
+- **Bottom bar**: the large Transcribe button, stage/percent/elapsed progress, Cancel, and the finished/failed status.
+- **Settings sheet**: appearance, on-device model (download, remove, import), Mistral API key and language, about/licences.
+- **History**: collapsing app bar, search, Local/Cloud badges, copy/share/delete.
 
 The screen stays awake while a transcription is running. A cancel button appears during active work. UI and notification Cancel use the same process-owned authority, including shares still waiting for metadata or model loading; cancelling these releases their foreground-service reservation immediately.
 
@@ -76,10 +84,13 @@ The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
 
 In the app:
 
+**One tap:** with Local selected, tap `Download model` on the main screen (or in settings). The app downloads `parakeet_ultra_encoder_30s_i8.tflite` from litert-community/parakeet-ultra into app-private storage (`no_backup/models`), resumes after cancellation or network errors, checks the exact size and the pinned SHA-256 (`706675fd…e5cd`) before installing it, and selects it. On a metered connection it asks first. A foreground notification keeps the download running in the background. `Remove download` in settings frees the space again.
+
+**Manual import** (e.g. the 10 s encoder):
+
 1. Open the settings sheet.
-2. Tap `Import .tflite` and select the encoder.
-3. Leave it selected and close settings.
-4. Select an audio file and tap `Transcribe`.
+2. Tap `Import .tflite file instead` and select the encoder.
+3. Select an audio file and tap `Transcribe`.
 
 The importer checks the filename and the TFLite header; the model is referenced through Android's Storage Access Framework, not copied into the APK. Files that are not part of the Parakeet Ultra family (for example Parakeet TDT v3 or NPU exports) are rejected with an error that names the Ultra encoder to import. The window length comes from the filename; browser suffixes such as ` (1)` are accepted. The settings list shows it as `Parakeet Ultra · CPU · 30 s windows`, and the main screen as `On-device model: Parakeet Ultra`. The `f16` encoders are listed but disabled: they are meant for GPU/NPU, which the app does not support for Ultra yet. Do not import the mel or decoder files; the app bundles them.
 
@@ -158,7 +169,8 @@ The dependency-free `AudioDecoderChecks` instrumentation runner exercises native
 
 ```text
 app/src/main/java/com/local/voicenotes/
-├── MainActivity.kt                 Compose screens (main, settings, history) and share intents
+├── MainActivity.kt                 Activity: share intents, theme, screen switching
+├── ui/                             Compose UI: theme, main screen, settings sheet, history, dialogs
 ├── AppViewModel.kt                 Thin UI adapter over the app-scoped graph
 ├── AppGraph.kt                     Process-wide coordinator, backends, history, audio grants
 ├── VoiceNotesApplication.kt        Owns AppGraph; tracks foreground visibility
@@ -179,7 +191,8 @@ app/src/main/java/com/local/voicenotes/
 │   ├── MistralTranscriptionBackend.kt
 │   └── ParakeetVocabulary.kt       Bundled vocabulary and detokenization
 └── model/
-    ├── ModelRepository.kt          Model import, saved selection, v3 record migration
+    ├── ModelRepository.kt          Model import/download records, saved selection, v3 migration
+    ├── ModelDownload.kt            Resumable, SHA-256-pinned encoder download
     ├── ModelFileCache.kt           Verified private copies of imported encoders
     └── ParakeetUltraModels.kt      Ultra encoder filename rules
 ```

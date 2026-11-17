@@ -12,8 +12,13 @@ import com.local.voicenotes.history.TranscriptHistoryStore
 import com.local.voicenotes.inference.LiteRtParakeetBackend
 import com.local.voicenotes.inference.MistralApiKeyStore
 import com.local.voicenotes.inference.MistralTranscriptionBackend
+import com.local.voicenotes.model.DownloadState
+import com.local.voicenotes.model.ModelDownload
 import com.local.voicenotes.model.ModelRepository
+import com.local.voicenotes.model.OkHttpRangeSource
+import com.local.voicenotes.model.ParakeetUltraDownload
 import com.local.voicenotes.model.ParakeetUltraModels
+import com.local.voicenotes.model.active
 import com.local.voicenotes.share.SharedWorkController
 import com.local.voicenotes.share.sharedAutoStart
 import com.local.voicenotes.work.TranscriptionService
@@ -27,8 +32,12 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.Call
+import java.util.concurrent.atomic.AtomicReference
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -127,6 +136,12 @@ class AppGraph(private val app: VoiceNotesApplication) {
     fun transcribe(): Boolean = sharedWork.transcribe()
     /** Single process-owned cancellation authority for UI and notification actions. */
     fun cancelWork() = sharedWork.cancelWork()
+
+    /** Notification Cancel and the service time limit stop all background work, downloads included. */
+    fun cancelAll() {
+        cancelWork()
+        cancelModelDownload()
+    }
     fun consentPromptShown() = sharedWork.consentPromptShown()
     fun grantCloudUploadConsent() {
         consentPreferences.edit().putBoolean("cloud_upload_consent", true).apply()
@@ -216,6 +231,100 @@ class AppGraph(private val app: VoiceNotesApplication) {
 
     /** True while the work service runs in the foreground. Main thread; set by the service. */
     @Volatile var workServiceInForeground = false
+
+    // ---- One-tap model download -------------------------------------------------------
+
+    private val mutableDownload = MutableStateFlow<DownloadState>(DownloadState.Idle)
+    val modelDownload: StateFlow<DownloadState> = mutableDownload.asStateFlow()
+    private var downloadJob: Job? = null
+    private val downloadCall = AtomicReference<Call?>()
+    private val download = ModelDownload(
+        directory = File(app.noBackupFilesDir, "models"),
+        spec = ParakeetUltraDownload.ENCODER_30S,
+        source = OkHttpRangeSource { downloadCall.set(it) }
+    )
+
+    /**
+     * Downloads, verifies and registers the pinned Parakeet Ultra encoder, then selects it unless
+     * the user switched to the cloud meanwhile. Must be called from a user action while visible
+     * (it starts the foreground service). Main thread.
+     */
+    fun startModelDownload(): Boolean {
+        if (downloadJob?.isCompleted == false) return false
+        mutableDownload.value = DownloadState.Running(0, ParakeetUltraDownload.ENCODER_30S.sizeBytes)
+        downloadJob = scope.launch {
+            try {
+                val file = withContext(Dispatchers.IO) {
+                    var lastPublished = -1L
+                    download.run(
+                        checkCancelled = { ensureActive() },
+                        onProgress = { done, total ->
+                            // ~0.25 % steps keep StateFlow/notification churn low.
+                            val step = done * 400 / total
+                            if (step != lastPublished) {
+                                lastPublished = step
+                                mutableDownload.value = DownloadState.Running(done, total)
+                            }
+                        },
+                        onVerifying = { mutableDownload.value = DownloadState.Verifying }
+                    )
+                }
+                val model = repository.registerDownloaded(file, ParakeetUltraDownload.ENCODER_30S)
+                coordinator.refreshModels().join()
+                if (coordinator.state.value.selectedModel?.isCloud() != true) coordinator.selectModel(model.id)
+                mutableDownload.value = DownloadState.Idle
+                log("Model download finished: ${file.length()} bytes")
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                mutableDownload.value = DownloadState.Idle
+                throw cancelled
+            } catch (error: Exception) {
+                // Cancelling the HTTP call surfaces as an IOException in the blocked read.
+                if (!kotlin.coroutines.coroutineContext.isActive) {
+                    mutableDownload.value = DownloadState.Idle
+                    throw kotlinx.coroutines.CancellationException("Download cancelled.").apply { initCause(error) }
+                }
+                log("Model download failed: ${error.message}")
+                mutableDownload.value = DownloadState.Failed(
+                    when (error) {
+                        is java.net.UnknownHostException, is java.net.ConnectException ->
+                            "No internet connection. Check your network and retry."
+                        is java.net.SocketTimeoutException -> "The connection timed out. Tap Retry to resume."
+                        else -> error.message ?: "Download failed."
+                    }
+                )
+            } finally {
+                downloadCall.set(null)
+            }
+        }
+        startWorkService()
+        return true
+    }
+
+    /** Cancels a running download; the partial file is kept so a retry resumes. */
+    fun cancelModelDownload() {
+        val job = downloadJob?.takeIf { it.isActive } ?: return
+        job.cancel()
+        downloadCall.getAndSet(null)?.cancel()
+    }
+
+    fun dismissDownloadError() {
+        if (mutableDownload.value is DownloadState.Failed) mutableDownload.value = DownloadState.Idle
+    }
+
+    /** Removes the downloaded encoder to free storage. Rejected while work is running. */
+    fun removeDownloadedModel(): Boolean {
+        if (coordinator.state.value.busy || mutableDownload.value.active) return false
+        val wasSelected = coordinator.state.value.selectedModelId == ParakeetUltraDownload.MODEL_ID
+        if (wasSelected && !coordinator.clearSelection()) return false
+        scope.launch {
+            runCatching {
+                repository.remove(ParakeetUltraDownload.MODEL_ID)
+                withContext(Dispatchers.IO) { download.delete() }
+            }.onFailure { log("Removing the downloaded model failed: ${it.message}") }
+            coordinator.refreshModels()
+        }
+        return true
+    }
 
     private val mutableShareReservations = MutableStateFlow(0)
     /** Number of shares waiting for their automatic transcription; the service stays while > 0. */

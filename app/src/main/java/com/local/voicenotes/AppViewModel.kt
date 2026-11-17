@@ -3,9 +3,18 @@ package com.local.voicenotes
 import android.app.Application
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
 import com.local.voicenotes.domain.LanguageOption
 import com.local.voicenotes.history.HistoryEntry
 import com.local.voicenotes.inference.MistralApiKeyStatus
+import com.local.voicenotes.model.DownloadState
+import com.local.voicenotes.model.ModelRecords
+import com.local.voicenotes.model.ParakeetUltraDownload
+import com.local.voicenotes.ui.Engine
+import com.local.voicenotes.ui.ThemeMode
+import com.local.voicenotes.ui.bestLocalModel
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -33,6 +42,63 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val cloudUploadConsent = graph.cloudUploadConsent
     val consentPrompt = graph.consentPrompt
     val shareHint = graph.shareHint
+
+    val modelDownload: StateFlow<DownloadState> = graph.modelDownload
+
+    // ---- Appearance ---------------------------------------------------------------------
+
+    private val uiPreferences = application.getSharedPreferences("ui", 0)
+    private val mutableThemeMode = MutableStateFlow(
+        ThemeMode.entries.firstOrNull { it.name == uiPreferences.getString("theme_mode", null) } ?: ThemeMode.SYSTEM
+    )
+    val themeMode: StateFlow<ThemeMode> = mutableThemeMode.asStateFlow()
+    private val mutableDynamicColor = MutableStateFlow(uiPreferences.getBoolean("dynamic_color", true))
+    val dynamicColor: StateFlow<Boolean> = mutableDynamicColor.asStateFlow()
+
+    fun setThemeMode(mode: ThemeMode) {
+        mutableThemeMode.value = mode
+        uiPreferences.edit().putString("theme_mode", mode.name).apply()
+    }
+
+    fun setDynamicColor(enabled: Boolean) {
+        mutableDynamicColor.value = enabled
+        uiPreferences.edit().putBoolean("dynamic_color", enabled).apply()
+    }
+
+    // ---- Mistral key status (null while loading) -----------------------------------------
+
+    private val mutableKeyStatus = MutableStateFlow<MistralApiKeyStatus?>(null)
+    val keyStatus: StateFlow<MistralApiKeyStatus?> = mutableKeyStatus.asStateFlow()
+
+    init { reloadKeyStatus() }
+
+    fun reloadKeyStatus() {
+        viewModelScope.launch {
+            try { mutableKeyStatus.value = apiKeyStatus() }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { mutableKeyStatus.value = MistralApiKeyStatus.UNREADABLE }
+        }
+    }
+
+    /**
+     * Switches between on-device and cloud transcription. Local without an installed model
+     * clears the selection, so nothing can be uploaded while the switch says "Local".
+     */
+    fun selectEngine(engine: Engine) {
+        when (engine) {
+            Engine.CLOUD -> coordinator.selectModel(ModelRecords.BUILT_IN_MISTRAL_ID)
+            Engine.LOCAL -> {
+                val local = bestLocalModel(state.value)
+                if (local != null) coordinator.selectModel(local.id) else coordinator.clearSelection()
+            }
+        }
+    }
+
+    fun downloadModel(): Boolean = graph.startModelDownload()
+    fun cancelModelDownload() = graph.cancelModelDownload()
+    fun dismissDownloadError() = graph.dismissDownloadError()
+    fun removeDownloadedModel(): Boolean = graph.removeDownloadedModel()
+    fun hasDownloadedModel(): Boolean = state.value.models.any { it.id == ParakeetUltraDownload.MODEL_ID }
 
     fun refreshModels() = coordinator.refreshModels()
 
@@ -77,7 +143,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     /** Saves the key; returns an error message for the UI instead of throwing on Keystore failure. */
     suspend fun setApiKey(apiKey: String): String? = withContext(Dispatchers.IO) {
         graph.mistralApiKeyStore.set(apiKey.trim()).exceptionOrNull()?.let { "Could not save the API key: ${it.message}" }
-    }
+    }.also { if (it == null) reloadKeyStatus() }
 
     /** Lock contention with a cancelled request must never stall the UI dispatcher. */
     suspend fun apiKeyStatus(): MistralApiKeyStatus = graph.mistralApiKeyStore.statusAsync()

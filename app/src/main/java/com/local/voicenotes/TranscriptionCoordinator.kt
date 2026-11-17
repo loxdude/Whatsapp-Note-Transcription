@@ -28,6 +28,9 @@ import java.util.UUID
 /** Sample rate of the PCM produced by [PcmDecoder]. */
 private const val PCM_SAMPLE_RATE = 16_000L
 
+/** Persisted selection meaning "no explicit choice"; never matches a model id. */
+internal const val NO_SELECTION = ""
+
 data class AppUiState(
     val models: List<ImportedModel> = emptyList(),
     val selectedModelId: String? = null,
@@ -235,6 +238,30 @@ class TranscriptionCoordinator(
         }
         persistSelection(id)
         preparation?.start()
+        return true
+    }
+
+    /**
+     * Clears the selection (the user chose on-device transcription but no local model is
+     * installed yet), so nothing, in particular no cloud model, can start. A pending
+     * preparation is superseded. Rejected while an import or transcription runs.
+     */
+    fun clearSelection(): Boolean {
+        val superseded = locked {
+            if (disposed || foregroundRunning()) return false
+            val pending = prepareJob?.takeIf { it.isActive }
+            if (pending != null) generation++
+            write {
+                it.copy(
+                    selectedModelId = null,
+                    progress = if (it.progress is TranscriptionProgress.LoadingModel) TranscriptionProgress.Idle else it.progress
+                )
+            }
+            pending
+        }
+        superseded?.cancel(CancellationException("Model selection cleared."))
+        // An unknown id persists "no explicit choice": the next start picks a local model only.
+        persistSelection(NO_SELECTION)
         return true
     }
 
