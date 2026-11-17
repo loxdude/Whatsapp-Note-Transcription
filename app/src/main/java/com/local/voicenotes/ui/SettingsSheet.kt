@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -131,8 +132,9 @@ fun SettingsSheet(
                     headlineContent = { Text("Wallpaper colours") },
                     supportingContent = { Text("Material You: match the colours of your wallpaper") },
                     leadingContent = { Icon(AppIcons.Palette, null) },
-                    trailingContent = { Switch(checked = dynamicColor, onCheckedChange = viewModel::setDynamicColor) },
-                    colors = ListItemDefaults.colors(containerColor = Color.Transparent)
+                    trailingContent = { Switch(checked = dynamicColor, onCheckedChange = null) },
+                    colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                    modifier = Modifier.toggleable(value = dynamicColor, role = Role.Switch, onValueChange = viewModel::setDynamicColor)
                 )
             }
 
@@ -195,13 +197,12 @@ fun SettingsSheet(
                     headlineContent = { Text("Translation") },
                     supportingContent = { Text("Translate transcripts on this phone") },
                     leadingContent = { Icon(AppIcons.Translate, null) },
-                    trailingContent = {
-                        Switch(
-                            checked = translation.enabled,
-                            onCheckedChange = { viewModel.setTranslationSettings(translation.copy(enabled = it)) }
-                        )
-                    },
-                    colors = ListItemDefaults.colors(containerColor = Color.Transparent)
+                    trailingContent = { Switch(checked = translation.enabled, onCheckedChange = null) },
+                    colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                    modifier = Modifier.toggleable(
+                        value = translation.enabled, role = Role.Switch,
+                        onValueChange = { viewModel.setTranslationSettings(translation.copy(enabled = it)) }
+                    )
                 )
                 val installedTranslation = TranslationModel.specs.filter { it.id in installed }
                 if (translation.enabled) {

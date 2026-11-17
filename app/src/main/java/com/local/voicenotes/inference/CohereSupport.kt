@@ -52,3 +52,46 @@ object CpuCores {
         (root.listFiles { file -> file.name.matches(Regex("cpu\\d+")) } ?: emptyArray())
             .mapNotNull { core -> runCatching { File(core, "cpufreq/cpuinfo_max_freq").readText().trim().toLong() }.getOrNull() }
 }
+
+/**
+ * Smooth progress for Cohere, whose native loop reports only after each window. Between
+ * reports the fraction grows with elapsed time at [msPerSecond] of compute per second of
+ * audio, but never past 95 % of the running window, so a slow window waits instead of
+ * overshooting. Thread-safe: native callbacks and the UI ticker run on different threads.
+ */
+class CohereProgressEstimate(private val samples: Int, private val msPerSecond: Long) {
+    companion object {
+        const val DEFAULT_MS_PER_SECOND = 600L
+        private const val SAMPLE_RATE = 16_000
+    }
+
+    private var startedAt = -1L
+    private var windowStartedAt = -1L
+    private var done = 0
+    private var total = 0
+
+    @Synchronized fun start(nowMs: Long) { startedAt = nowMs; windowStartedAt = nowMs }
+
+    @Synchronized fun window(done: Int, total: Int, nowMs: Long) {
+        if (total <= 0) return
+        if (done != this.done || this.total == 0) windowStartedAt = nowMs
+        this.done = done
+        this.total = total
+    }
+
+    @Synchronized fun fraction(nowMs: Long): Float {
+        if (startedAt < 0) return 0f
+        val windows = if (total > 0) total else maxOf(1, (samples + 30 * SAMPLE_RATE - 1) / (30 * SAMPLE_RATE))
+        if (done >= windows) return 1f
+        val windowSeconds = samples.toFloat() / SAMPLE_RATE / windows
+        val expectedMs = (windowSeconds * msPerSecond).coerceAtLeast(500f)
+        val inWindow = ((nowMs - windowStartedAt) / expectedMs).coerceIn(0f, 0.95f)
+        return ((done + inWindow) / windows).coerceIn(0.01f, 1f)
+    }
+
+    /** Compute ms per audio second of the finished run, or null if it did not finish. */
+    @Synchronized fun measured(): Long? {
+        if (total == 0 || done < total || startedAt < 0 || samples < SAMPLE_RATE) return null
+        return ((windowStartedAt - startedAt) * SAMPLE_RATE / samples).coerceIn(50L, 5_000L)
+    }
+}

@@ -9,7 +9,11 @@ import com.local.voicenotes.model.CohereArabicModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.job
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.Executors
@@ -28,6 +32,9 @@ class CohereArabicBackend(private val threads: () -> Int) : TranscriptionBackend
 
     private val executor = Executors.newSingleThreadExecutor { Thread(it, "CohereArabic") }
     private val dispatcher = executor.asCoroutineDispatcher()
+
+    /** Measured compute time per second of audio on this phone; starts with a mid-range guess. */
+    @Volatile private var msPerSecond = CohereProgressEstimate.DEFAULT_MS_PER_SECOND
 
     // Touched only on the executor thread.
     private var handle = 0L
@@ -55,13 +62,37 @@ class CohereArabicBackend(private val threads: () -> Int) : TranscriptionBackend
         pcm16KhzMono: FloatArray,
         language: LanguageOption,
         onProgress: (Float) -> Unit
+    ): String = coroutineScope {
+        // Native code reports progress only after each 30 s window, so a ticker interpolates
+        // within the running window from the measured speed of this phone.
+        val estimate = CohereProgressEstimate(pcm16KhzMono.size, msPerSecond)
+        val ticker = launch(Dispatchers.Default) {
+            while (isActive) {
+                delay(250)
+                onProgress(estimate.fraction(SystemClock.elapsedRealtime()))
+            }
+        }
+        try {
+            transcribeOnEngine(model, pcm16KhzMono, estimate, onProgress)
+        } finally {
+            ticker.cancel()
+        }
+    }
+
+    private suspend fun transcribeOnEngine(
+        model: ImportedModel,
+        pcm16KhzMono: FloatArray,
+        estimate: CohereProgressEstimate,
+        onProgress: (Float) -> Unit
     ): String = withContext(dispatcher) {
         // The Arabic finetune is always prompted as Arabic; the app's language option is ignored.
         val job = coroutineContext.job
         val loaded = ensureLoaded(model)
         val started = SystemClock.elapsedRealtime()
+        estimate.start(started)
         val control = CohereControl { done, total ->
-            if (total > 0) onProgress(done.toFloat() / total)
+            estimate.window(done, total, SystemClock.elapsedRealtime())
+            if (total > 0) onProgress(estimate.fraction(SystemClock.elapsedRealtime()))
             job.isActive
         }
         val bytes = try {
@@ -69,6 +100,7 @@ class CohereArabicBackend(private val threads: () -> Int) : TranscriptionBackend
         } catch (error: OutOfMemoryError) {
             throw IllegalStateException("Not enough memory for Arabic transcription.", error)
         }
+        estimate.measured()?.let { msPerSecond = it }
         if (bytes == null || !job.isActive) throw CancellationException("Transcription cancelled.")
         val text = CohereText.clean(String(bytes, Charsets.UTF_8))
         Log.i(TAG, "transcribe samples=${pcm16KhzMono.size} total=${SystemClock.elapsedRealtime() - started}ms")

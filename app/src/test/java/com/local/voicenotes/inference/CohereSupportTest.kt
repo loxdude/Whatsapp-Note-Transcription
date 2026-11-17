@@ -35,4 +35,24 @@ class CohereSupportTest {
         File(root, "cpufreq").mkdirs()
         assertEquals(listOf(1_800_000L, 2_400_000L), CpuCores.readMaxFreqsKhz(root).sorted())
     }
+
+    @Test fun progressMovesWithinAWindowButWaitsBeforeTheEnd() {
+        val p = CohereProgressEstimate(samples = 16_000 * 20, msPerSecond = 500) // one 20 s window, ~10 s
+        p.start(0)
+        assertEquals(0.01f, p.fraction(0), 1e-4f)
+        assertEquals(0.5f, p.fraction(5_000), 1e-3f)
+        assertEquals(0.95f, p.fraction(60_000), 1e-3f)
+        p.window(1, 1, 9_000)
+        assertEquals(1f, p.fraction(9_000), 0f)
+        assertEquals(450L, p.measured())
+    }
+
+    @Test fun progressCountsFinishedWindows() {
+        val p = CohereProgressEstimate(samples = 16_000 * 60, msPerSecond = 100) // two 30 s windows
+        p.start(0)
+        p.window(1, 2, 2_000)
+        assertEquals(0.5f, p.fraction(2_000), 1e-3f)
+        assertEquals(0.75f, p.fraction(3_500), 1e-3f)
+        assertEquals(null, p.measured())
+    }
 }
