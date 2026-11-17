@@ -171,6 +171,7 @@ fun SettingsSheet(
                             when (keyStatus) {
                                 null -> "Checking…"
                                 MistralApiKeyStatus.CONFIGURED -> "Saved on this device, encrypted"
+                                MistralApiKeyStatus.CONFIGURED_UNENCRYPTED -> "Saved on this device, not yet encrypted"
                                 MistralApiKeyStatus.UNREADABLE -> "Could not be decrypted; enter it again"
                                 else -> "Not set"
                             }

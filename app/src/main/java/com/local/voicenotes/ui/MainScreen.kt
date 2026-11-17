@@ -94,6 +94,7 @@ import com.local.voicenotes.AppViewModel
 import com.local.voicenotes.domain.LanguageOption
 import com.local.voicenotes.domain.TranscriptionProgress
 import com.local.voicenotes.inference.MistralApiKeyStatus
+import com.local.voicenotes.inference.isConfigured
 import com.local.voicenotes.model.DownloadState
 import com.local.voicenotes.model.ParakeetUltraDownload
 import com.local.voicenotes.model.active
@@ -418,7 +419,7 @@ fun DownloadProgress(download: DownloadState, onCancel: () -> Unit) {
 @Composable
 private fun CloudStatus(keyStatus: MistralApiKeyStatus?, onEditKey: () -> Unit) {
     val unreadable = keyStatus == MistralApiKeyStatus.UNREADABLE
-    if (keyStatus == null || keyStatus == MistralApiKeyStatus.CONFIGURED) return
+    if (keyStatus == null || keyStatus.isConfigured) return
     FilledTonalButton(onClick = onEditKey, modifier = Modifier.padding(horizontal = 4.dp)) {
         Icon(if (unreadable) Icons.Default.Warning else AppIcons.Key, null, Modifier.size(ButtonDefaults.IconSize))
         Spacer(Modifier.width(ButtonDefaults.IconSpacing))
