@@ -98,18 +98,19 @@ import com.local.voicenotes.model.ParakeetUltraDownload
 import com.local.voicenotes.model.active
 import com.local.voicenotes.model.formatBytes
 import kotlinx.coroutines.launch
+import com.local.voicenotes.share.VoiceNoteFolders
 import java.util.Locale
 
-/** Opens the picker in WhatsApp's voice-note folder; the system falls back to its default location if unavailable. */
-private class WhatsAppVoiceNotePicker : ActivityResultContracts.OpenDocument() {
+/** System file picker opening at [initial]; the system falls back to its default location if unavailable. */
+private class OpenDocumentAt(private val initial: () -> android.net.Uri) : ActivityResultContracts.OpenDocument() {
     override fun createIntent(context: Context, input: Array<String>): Intent =
-        super.createIntent(context, input).putExtra(
-            DocumentsContract.EXTRA_INITIAL_URI,
-            DocumentsContract.buildDocumentUri(
-                "com.android.externalstorage.documents",
-                "primary:Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Voice Notes"
-            )
-        )
+        super.createIntent(context, input).putExtra(DocumentsContract.EXTRA_INITIAL_URI, initial())
+}
+
+/** One-time folder grant, opening at WhatsApp's voice-note folder. */
+private class OpenVoiceNoteFolder : ActivityResultContracts.OpenDocumentTree() {
+    override fun createIntent(context: Context, input: android.net.Uri?): Intent =
+        super.createIntent(context, input ?: VoiceNoteFolders.whatsAppVoiceNotes)
 }
 
 private val AUDIO_TYPES = arrayOf("audio/*", "application/octet-stream")
@@ -122,11 +123,20 @@ fun MainScreen(
     historyError: String?,
     onWorkStarted: () -> Unit
 ) {
-    val audioPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+    // "Files" starts at the top of the internal storage (/storage/emulated/0).
+    val audioPicker = rememberLauncherForActivityResult(OpenDocumentAt { VoiceNoteFolders.primaryRoot }) { uri ->
         uri?.let(viewModel::setAudio)
     }
-    val whatsAppPicker = rememberLauncherForActivityResult(WhatsAppVoiceNotePicker()) { uri ->
+    val whatsAppSystemPicker = rememberLauncherForActivityResult(OpenDocumentAt { VoiceNoteFolders.whatsAppVoiceNotes }) { uri ->
         uri?.let(viewModel::setAudio)
+    }
+    var showVoiceNotes by rememberSaveable { mutableStateOf(false) }
+    val voiceNoteTree by viewModel.voiceNoteTree.collectAsStateWithLifecycle()
+    val folderPicker = rememberLauncherForActivityResult(OpenVoiceNoteFolder()) { tree ->
+        if (tree != null) {
+            viewModel.setVoiceNoteTree(tree)
+            showVoiceNotes = true
+        }
     }
     val download by viewModel.modelDownload.collectAsStateWithLifecycle()
     val keyStatus by viewModel.keyStatus.collectAsStateWithLifecycle()
@@ -226,7 +236,7 @@ fun MainScreen(
         val audioSection: @Composable () -> Unit = {
             AudioCard(
                 state, shareHint,
-                onWhatsApp = { whatsAppPicker.launch(AUDIO_TYPES) },
+                onWhatsApp = { if (voiceNoteTree == null) folderPicker.launch(null) else showVoiceNotes = true },
                 onFiles = { audioPicker.launch(AUDIO_TYPES) }
             )
         }
@@ -269,6 +279,15 @@ fun MainScreen(
         }
     }
 
+    if (showVoiceNotes) {
+        VoiceNoteSheet(
+            viewModel = viewModel,
+            onPick = { uri -> showVoiceNotes = false; viewModel.setAudio(uri) },
+            onChangeFolder = { showVoiceNotes = false; folderPicker.launch(null) },
+            onSystemPicker = { showVoiceNotes = false; whatsAppSystemPicker.launch(AUDIO_TYPES) },
+            onDismiss = { showVoiceNotes = false }
+        )
+    }
     if (showSettings) {
         SettingsSheet(
             state = state, viewModel = viewModel, download = download, keyStatus = keyStatus,

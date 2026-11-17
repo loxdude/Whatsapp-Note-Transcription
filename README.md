@@ -24,7 +24,7 @@ Material 3 with Material You: colours follow the wallpaper, including the adapti
 
 - **Local / Cloud switch** at the top. Local runs Parakeet Ultra on the phone; Cloud uses Mistral Voxtral. Choosing Local without an installed model selects nothing, so audio is never uploaded while the switch says Local.
 - Local shows nothing extra once ready; Cloud shows one line (uploads to Mistral, automatic language). A setup card with the one-tap download appears only while no local model is installed; Cloud shows the API-key status. There is no language picker: both engines detect the language.
-- **Audio card** with WhatsApp and Files pickers; a waveform animates while work runs.
+- **Audio card**: `WhatsApp` asks once for the WhatsApp voice-note folder (a read-only Storage Access Framework grant, opened at `Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Voice Notes`) and then shows an in-app list of the newest voice notes first (only the newest weekly folders are read). The system picker cannot be sorted by an app, and that folder has a `.nomedia` file, so MediaStore does not index it. `Files` opens the system picker at the top of internal storage. A waveform animates while work runs.
 - **Transcript card**: editable, with copy and share.
 - **Bottom bar**: the large Transcribe button, stage/percent/elapsed progress, Cancel, and the finished/failed status.
 - **Settings sheet**: appearance, on-device model (download, remove, import), Mistral API key, about/licences.

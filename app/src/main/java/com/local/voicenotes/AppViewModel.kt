@@ -65,6 +65,38 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         uiPreferences.edit().putBoolean("dynamic_color", enabled).apply()
     }
 
+    // ---- WhatsApp voice-note folder (persisted SAF tree grant) ------------------------------
+
+    private val folderPreferences = application.getSharedPreferences("audio_selection", 0)
+    private val lister = com.local.voicenotes.share.VoiceNoteFolderLister(application.contentResolver)
+    private val mutableVoiceNoteTree = MutableStateFlow(
+        folderPreferences.getString("voice_note_tree", null)?.let(Uri::parse)?.takeIf { tree ->
+            application.contentResolver.persistedUriPermissions.any { it.uri == tree && it.isReadPermission }
+        }
+    )
+    /** Granted WhatsApp voice-note folder, or null until the user picked it once. */
+    val voiceNoteTree: StateFlow<Uri?> = mutableVoiceNoteTree.asStateFlow()
+
+    fun setVoiceNoteTree(tree: Uri) {
+        val resolver = getApplication<Application>().contentResolver
+        val previous = mutableVoiceNoteTree.value
+        resolver.takePersistableUriPermission(tree, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        if (previous != null && previous != tree) {
+            runCatching { resolver.releasePersistableUriPermission(previous, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+        }
+        folderPreferences.edit().putString("voice_note_tree", tree.toString()).apply()
+        mutableVoiceNoteTree.value = tree
+    }
+
+    /** Newest voice notes of the granted folder, newest first. */
+    suspend fun recentVoiceNotes(): Result<List<com.local.voicenotes.share.VoiceNoteFile>> =
+        withContext(Dispatchers.IO) {
+            val tree = mutableVoiceNoteTree.value ?: return@withContext Result.failure(IllegalStateException("No folder"))
+            try { Result.success(lister.newest(tree)) }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (error: Exception) { Result.failure(error) }
+        }
+
     // ---- Mistral key status (null while loading) -----------------------------------------
 
     private val mutableKeyStatus = MutableStateFlow<MistralApiKeyStatus?>(null)
