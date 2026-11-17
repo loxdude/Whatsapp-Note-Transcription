@@ -66,6 +66,8 @@ dependencies {
 
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.activity:activity-compose:1.10.0")
+    // LiteRT pulls in fragment 1.1.0 transitively; ActivityResult APIs need >= 1.3.0.
+    implementation("androidx.fragment:fragment-ktx:1.8.9")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")

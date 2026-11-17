@@ -15,7 +15,7 @@ Get the APK from the [releases page](https://github.com/loxdude/Whatsapp-Note-Tr
 
 ## Getting started
 
-Local: tap Download once. The app fetches the 665 MB encoder, resumes if the connection drops and checks the SHA-256 before using it. Then pick a note and tap Transcribe. If you already have `parakeet_ultra_encoder_30s_i8.tflite`, you can import it in Settings instead.
+Local: tap Download once. The app fetches the 665 MB encoder and checks its SHA-256 before using it. If the connection drops, tap Retry and it continues where it stopped. Then pick a note and tap Transcribe. If you already have `parakeet_ultra_encoder_30s_i8.tflite`, you can import it in Settings instead.
 
 Cloud: create a key at [console.mistral.ai](https://console.mistral.ai), add it in Settings and switch to Cloud. The app uploads the original audio file to Mistral. The key is encrypted with AES-GCM using a key held in Android Keystore.
 
@@ -23,9 +23,9 @@ The app never switches to the cloud by itself. If Local is selected and no model
 
 ## How local transcription works
 
-The APK bundles the mel front end and the decoder (about 20 MB), so the encoder is the only large download. Audio is cut into 30 s windows that overlap by 2 s, and each word at a cut is kept by exactly one window. Everything runs on the CPU with XNNPACK. Local notes can be up to 15 minutes long.
+The APK bundles the mel front end and the decoder (about 20 MB), so the encoder is the only large download. Audio is cut into 30 s windows that overlap by 2 s. Each window keeps the words from its own half of the overlap, which avoids most cut-off or doubled words at the seams, though it can still miss or repeat one now and then. Everything runs on the CPU with XNNPACK. Local notes can be up to 15 minutes long.
 
-On a Galaxy Note10+ each 30 s window takes about 2.4 s to encode. A Z Fold 4 does a 77 s note in about 3 s. WhatsApp's Opus files are decoded by a bundled libopus, which takes well under a second.
+On a Galaxy Note10+ each 30 s window takes about 2.4 s to encode. A Z Fold 4 does a 77 s note in about 3 s. WhatsApp's Opus files are decoded by a bundled libopus. On these phones that took under a second for notes of a few minutes.
 
 ## Accuracy
 
@@ -37,7 +37,7 @@ These are word error rates on 29 German WhatsApp voice notes (23 minutes). The r
 | Parakeet Ultra, 10 s windows with overlap | 12.2% |
 | Parakeet Ultra, 30 s windows with overlap (current) | 10.4% |
 
-The 10 s windows were less accurate and, once you count the overlap, not any cheaper to run. That is why the app only supports the 30 s encoder.
+The 10 s windows were less accurate. On the Note10+ they also saved no compute on long notes, because the overlap repeats more audio. Short notes run faster with 10 s windows, but not by enough to justify a second encoder, so the app only supports the 30 s one.
 
 ## Building
 
@@ -48,7 +48,7 @@ You need JDK 17 and the Android SDK (compile SDK 35).
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-`./gradlew assembleRelease` builds the minified APK (about 28 MB). For now it is signed with the local debug key, so it installs over debug builds without wiping data. Run the JVM tests with `./gradlew testDebugUnitTest`.
+`./gradlew assembleRelease` builds the minified APK (about 28 MB). For now it is signed with the local debug key. It installs over a debug build only if both were signed on the same machine, and a build from another machine cannot update the published APK. Run the JVM tests with `./gradlew testDebugUnitTest`.
 
 In debuggable builds a `MISTRAL_API_KEY` environment variable overrides the saved key. Release builds ignore it. For timings, run `adb logcat -s VoiceNotesBenchmark LiteRtParakeet`.
 
