@@ -1,5 +1,6 @@
 package com.local.voicenotes.inference
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ensureActive
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
@@ -17,7 +18,9 @@ internal data class MistralStagedAudio(
 
 /**
  * Android-free request/staging boundary shared by the URI and PCM entry points.
- * One request per backend; overlap is rejected rather than replacing its cancel marker.
+ * One request per backend; a new request never replaces the active cancel marker. It cancels
+ * the previous request (whose job was already cancelled, e.g. Cancel then Transcribe again)
+ * and waits until that one has released the marker and deleted its staging file.
  * A stage function owns partial-file cleanup until it successfully returns its source.
  */
 internal class MistralTranscriptionRequests {
@@ -26,6 +29,8 @@ internal class MistralTranscriptionRequests {
     internal class Request(private val checkJob: () -> Unit) {
         private val cancelled = AtomicBoolean(false)
         @Volatile private var cancelCall: (() -> Unit)? = null
+        /** Completed once this request no longer holds the active marker. */
+        val released = CompletableDeferred<Unit>()
 
         fun ensureActive() {
             checkJob()
@@ -53,7 +58,12 @@ internal class MistralTranscriptionRequests {
         val jobContext = coroutineContext
         val request = Request { jobContext.ensureActive() }
         // Publish before the potentially uninterruptible Keystore read, never after it.
-        check(active.compareAndSet(null, request)) { "A transcription is already active." }
+        while (!active.compareAndSet(null, request)) {
+            val previous = active.get() ?: continue
+            previous.cancel()
+            // Cancellable: cancelling this request while it waits leaves the marker untouched.
+            previous.released.await()
+        }
         var source: MistralStagedAudio? = null
         try {
             request.ensureActive()
@@ -68,6 +78,7 @@ internal class MistralTranscriptionRequests {
                 source?.takeIf { it.temporary }?.file?.delete()
             } finally {
                 active.compareAndSet(request, null)
+                request.released.complete(Unit)
             }
         }
     }

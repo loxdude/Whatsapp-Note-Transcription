@@ -17,6 +17,27 @@ val AppUiState.canRequestTranscription: Boolean
     get() = canTranscribe || (progress is com.local.voicenotes.domain.TranscriptionProgress.LoadingModel &&
         audioUri != null && selectedModel?.enabled == true)
 
+/**
+ * A Transcribe tap (or consent confirmation) made while the model was still loading. It is
+ * bound to the audio and model it was made for, so it never starts something else.
+ * Serializable for rememberSaveable.
+ */
+data class PendingStart(val audioUri: String, val modelId: String) : java.io.Serializable
+
+enum class PendingStartAction { WAIT, START, DROP }
+
+/**
+ * What to do with [pending] in [state]: start once the model is loaded, keep waiting while it
+ * loads, and drop it when the audio or model changed, or loading failed or was cancelled.
+ */
+fun pendingStartAction(pending: PendingStart, state: AppUiState): PendingStartAction = when {
+    state.audioUri != pending.audioUri || state.selectedModelId != pending.modelId -> PendingStartAction.DROP
+    state.progress is com.local.voicenotes.domain.TranscriptionProgress.LoadingModel -> PendingStartAction.WAIT
+    state.canTranscribe && state.progress == com.local.voicenotes.domain.TranscriptionProgress.Idle -> PendingStartAction.START
+    // Cancelled, Failed, or other work (import, transcription) took over.
+    else -> PendingStartAction.DROP
+}
+
 /** The switch reflects the actual selection; no selection (no local model yet) reads as Local. */
 fun engineOf(state: AppUiState): Engine = if (state.selectedModel?.isCloud() == true) Engine.CLOUD else Engine.LOCAL
 

@@ -25,7 +25,7 @@ class SharedAudioTest {
         audioUri = audio, audioName = "PTT.opus", progress = progress, transcript = transcript
     )
 
-    private fun decide(state: AppUiState, consent: Boolean = false) = decideSharedAudio(state, uri, consent)
+    private fun decide(state: AppUiState) = decideSharedAudio(state, uri)
 
     @Test fun transcribesWithAUsableLocalModel() {
         assertEquals(SharedAudioDecision.TRANSCRIBE, decide(state()))
@@ -41,9 +41,8 @@ class SharedAudioTest {
         assertEquals(SharedAudioDecision.NO_USABLE_MODEL, decide(state(selected = disabled)))
     }
 
-    @Test fun cloudModelNeverTranscribesWithoutConsent() {
-        assertEquals(SharedAudioDecision.NEEDS_CONSENT, decide(state(selected = cloud), consent = false))
-        assertEquals(SharedAudioDecision.TRANSCRIBE, decide(state(selected = cloud), consent = true))
+    @Test fun cloudModelIsNeverTranscribedAutomatically() {
+        assertEquals(SharedAudioDecision.CLOUD_NEEDS_TAP, decide(state(selected = cloud)))
     }
 
     @Test fun abortsWhenAudioChangedOrUserAlreadyActed() {
