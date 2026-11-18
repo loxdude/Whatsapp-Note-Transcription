@@ -9,7 +9,7 @@ CRISPASR_COMMIT=bae18989da572cacfb8ab7a186f086ebe0932e2a
 GGML_COMMIT=1b972bb754aa5f83e2d872ccf37a335717f6658d
 SRC="${CRISPASR_SRC:-$ROOT/build/native-deps/CrispASR}"
 
-if [ ! -d "$SRC/.git" ]; then
+if [ ! -e "$SRC/.git" ]; then
     mkdir -p "$SRC"
     git -C "$SRC" init -q
     git -C "$SRC" fetch -q --depth 1 "$CRISPASR_URL" "$CRISPASR_COMMIT"
@@ -27,12 +27,34 @@ check() {
 }
 check CrispASR "$(git -C "$SRC" rev-parse HEAD)" "$CRISPASR_COMMIT"
 check ggml "$(git -C "$SRC/ggml" rev-parse HEAD)" "$GGML_COMMIT"
-if ! git -C "$SRC" diff --quiet HEAD -- || ! git -C "$SRC/ggml" diff --quiet HEAD --; then
+crisp_status=$(git -C "$SRC" status --porcelain --untracked-files=normal --ignore-submodules=none)
+ggml_status=$(git -C "$SRC/ggml" status --porcelain --untracked-files=normal)
+if [ -n "$crisp_status" ] || [ -n "$ggml_status" ]; then
     echo "The CrispASR checkout at $SRC has local changes" >&2
     exit 1
 fi
 
 : "${ANDROID_NDK_HOME:?Set ANDROID_NDK_HOME to Android NDK r27c}"
+
+# Keep the pinned dependency clean. Snapshot it into a build directory keyed
+# by the two upstream revisions and the source patch.
+PATCH="$ROOT/native/cohere/crispasr-hybrid-encoder-repack.patch"
+RECIPE_ID=$({ printf '%s\n' "$CRISPASR_COMMIT" "$GGML_COMMIT"; cat "$PATCH"; } | sha256sum | cut -d' ' -f1)
+PATCHED_SRC="$ROOT/build/native-deps/CrispASR-cohere-$RECIPE_ID"
+mkdir -p "$(dirname "$PATCHED_SRC")"
+STAGE=$(mktemp -d "${PATCHED_SRC}.XXXXXX")
+trap 'rm -rf -- "$STAGE"' EXIT
+git -C "$SRC" archive "$CRISPASR_COMMIT" | tar -x -C "$STAGE"
+mkdir -p "$STAGE/ggml"
+git -C "$SRC/ggml" archive "$GGML_COMMIT" | tar -x -C "$STAGE/ggml"
+patch -d "$STAGE" -p1 --batch --forward --fuzz=0 -i "$PATCH"
+if [ ! -d "$PATCHED_SRC" ] && mv -T "$STAGE" "$PATCHED_SRC"; then
+    trap - EXIT
+elif ! diff -qr --no-dereference "$STAGE" "$PATCHED_SRC"; then
+    echo "Unexpected changes in staged CrispASR sources at $PATCHED_SRC" >&2
+    exit 1
+fi
+SRC="$PATCHED_SRC"
 ANDROID_ARGS=(
   -DCMAKE_BUILD_TYPE=Release
   -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake"
@@ -41,16 +63,20 @@ ANDROID_ARGS=(
   -DCMAKE_C_FLAGS="-ffunction-sections -fdata-sections"
   -DCMAKE_CXX_FLAGS="-ffunction-sections -fdata-sections"
 )
-# 1. CrispASR's Cohere backend, crispasr-core and ggml (CPU only, no OpenMP, no extras).
-CRISP_BUILD="$ROOT/build/native-crispasr-arm64"
+# 1. CrispASR's Cohere backend, crispasr-core and ggml (CPU only, with OpenMP).
+CRISP_BUILD="$ROOT/build/native-crispasr-arm64/$RECIPE_ID"
 cmake -S "$SRC" -B "$CRISP_BUILD" "${ANDROID_ARGS[@]}" \
-  -DBUILD_SHARED_LIBS=OFF -DCMAKE_DISABLE_FIND_PACKAGE_OpenMP=ON \
-  -DGGML_OPENMP=OFF -DGGML_NATIVE=OFF -DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod+fp16 \
+  -DBUILD_SHARED_LIBS=OFF -DCMAKE_DISABLE_FIND_PACKAGE_OpenMP=OFF \
+  -DGGML_OPENMP=ON -DGGML_NATIVE=OFF -DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod+fp16 \
   -DGGML_VULKAN=OFF -DGGML_OPENCL=OFF -DGGML_BACKEND_DL=OFF -DGGML_CCACHE=OFF \
   -DCRISPASR_BUILD_TESTS=OFF -DCRISPASR_BUILD_EXAMPLES=OFF -DCRISPASR_BUILD_SERVER=OFF \
   -DCRISPASR_CURL=OFF -DCRISPASR_SDL2=OFF -DCRISPASR_OPUS=OFF -DCRISPASR_OPUS_FETCH=OFF \
   -DCRISPASR_AMR=OFF -DCRISPASR_MEDIA_NDK=OFF -DCRISPASR_CPU_BLAS=OFF -DCRISPASR_MEL_BLAS=OFF \
   -DCRISPASR_C2PA_FETCH=OFF -DCRISPASR_NO_C2PA_NATIVE=ON -DCRISPASR_WITH_ESPEAK_NG=OFF
+if ! grep -qx 'GGML_OPENMP_ENABLED:INTERNAL=ON' "$CRISP_BUILD/CMakeCache.txt"; then
+    echo "The pinned ggml build did not enable OpenMP" >&2
+    exit 1
+fi
 cmake --build "$CRISP_BUILD" --target cohere -j "${JOBS:-4}"
 # 2. The JNI shim, linked into one stripped library (API 31, 16 KB pages).
 BUILD="$ROOT/build/native-cohere-arm64"
@@ -60,5 +86,11 @@ OUT="$ROOT/app/src/main/jniLibs/arm64-v8a"
 mkdir -p "$OUT"
 "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" --strip-unneeded \
   -o "$OUT/libvoicenotes_cohere.so" "$BUILD/libvoicenotes_cohere.so"
-"$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -d "$OUT/libvoicenotes_cohere.so" | grep NEEDED
+NEEDED=$("$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" \
+  -d "$OUT/libvoicenotes_cohere.so" | grep NEEDED)
+printf '%s\n' "$NEEDED"
+if grep -Eq '\[(libomp|libc[+][+]_shared)\.so\]' <<< "$NEEDED"; then
+    echo "The Cohere JNI library must link the runtime libraries statically" >&2
+    exit 1
+fi
 sha256sum "$OUT/libvoicenotes_cohere.so"

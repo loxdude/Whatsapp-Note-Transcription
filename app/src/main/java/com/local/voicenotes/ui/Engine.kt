@@ -53,7 +53,8 @@ fun bestLocalModel(state: AppUiState, choice: LocalModelChoice = LocalModelChoic
 fun localModelFor(models: List<ImportedModel>, choice: LocalModelChoice, selectedId: String? = null): ImportedModel? {
     val usable = models.filter { it.enabled && !it.isCloud() }
     return when (choice) {
-        LocalModelChoice.ARABIC -> usable.firstOrNull(CohereArabicModel::isArabic)
+        LocalModelChoice.ARABIC -> usable.firstOrNull { it.id == CohereArabicModel.MODEL_ID && CohereArabicModel.isArabic(it) }
+            ?: usable.firstOrNull(CohereArabicModel::isArabic)
         LocalModelChoice.PARAKEET -> {
             val parakeet = usable.filterNot(CohereArabicModel::isArabic)
             parakeet.firstOrNull { it.id == selectedId }

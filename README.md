@@ -21,7 +21,7 @@ Local: tap Download once. The app fetches the 665 MB encoder and checks its SHA-
 
 Cloud: create a key at [console.mistral.ai](https://console.mistral.ai), add it in Settings and switch to Cloud. The app uploads the original audio file to Mistral. It asks once before the first upload, and you can take that back in Settings. Audio shared from another app is never uploaded until you tap Transcribe. The key is encrypted with AES-GCM using a key held in Android Keystore.
 
-Arabic: in Settings under Local transcription, choose "Arabic (Cohere)" and download the 1.5 GB model. Local transcription then treats every note as Arabic. Switch back to Parakeet at any time; both models can stay installed.
+Arabic: in Settings under Local transcription, choose "Arabic (Cohere)" and download the 1.3 GB model. Local transcription then treats every note as Arabic. Switch back to Parakeet at any time; both models can stay installed.
 
 Translation: turn on Translation in Settings, pick Gemma 4 E4B (3.7 GB, better) or E2B (2.6 GB, faster), download it and choose the target language (English, German, Arabic or a custom one). Both models can stay installed; switching only changes which one is used. A Translate button then appears under every transcript. The translation runs on the phone and is saved with the transcript in the history. The first translation after starting the app loads the model, which takes 5 seconds to about a minute depending on the phone.
 

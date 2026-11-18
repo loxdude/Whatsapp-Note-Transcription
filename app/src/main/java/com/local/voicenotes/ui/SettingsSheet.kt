@@ -142,6 +142,7 @@ fun SettingsSheet(
             SectionLabel("Local transcription")
             SettingsCard {
                 val arabicRecord = state.models.firstOrNull { it.id == CohereArabicModel.MODEL_ID }
+                val legacyArabic = state.models.any { it.id == CohereArabicModel.LEGACY_MODEL_ID }
                 val downloaded = state.models.firstOrNull { it.id == ParakeetUltraDownload.MODEL_ID }
                 val imported = state.models.filter {
                     it.enabled && !it.isCloud() && it.id != ParakeetUltraDownload.MODEL_ID && !CohereArabicModel.isArabic(it)
@@ -158,6 +159,8 @@ fun SettingsSheet(
                                     download.active -> "Downloading…"
                                     localModel == LocalModelChoice.ARABIC && arabicRecord != null ->
                                         "Installed · ${formatBytes(arabicRecord.sizeBytes)}"
+                                    localModel == LocalModelChoice.ARABIC && legacyArabic ->
+                                        "Older, slower version installed. Download the new one to replace it."
                                     localModel == LocalModelChoice.PARAKEET && downloaded != null ->
                                         "Installed · ${formatBytes(downloaded.sizeBytes)}"
                                     localModel == LocalModelChoice.PARAKEET && imported.isNotEmpty() -> "Installed from a file"

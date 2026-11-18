@@ -295,6 +295,16 @@ class AppGraph(private val app: VoiceNotesApplication) {
         coordinator.refreshModels().join()
         val state = coordinator.state.value
         if (state.selectedModel?.isCloud() != true && localModel.value == choice) coordinator.selectModel(record.id)
+        if (spec.id == ModelSpecs.COHERE_ARABIC.id) removeLegacyArabicModel()
+    }
+
+    /** Deletes the slower Q4_K Arabic file of 0.7.0 once the new one is installed. */
+    private suspend fun removeLegacyArabicModel() {
+        val legacy = coordinator.state.value.models.firstOrNull { it.id == CohereArabicModel.LEGACY_MODEL_ID } ?: return
+        cohereBackend.release()
+        repository.remove(legacy.id)
+        withContext(Dispatchers.IO) { runCatching { File(legacy.path).delete() } }
+        coordinator.refreshModels().join()
     }
 
     /** Cancels a running download; the partial file is kept so a retry resumes. */

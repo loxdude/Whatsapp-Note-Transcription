@@ -27,6 +27,7 @@ target_include_directories(voicenotes_cohere PRIVATE "${CRISPASR_DIR}/src" "${CR
 target_compile_options(voicenotes_cohere PRIVATE -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections)
 target_link_libraries(voicenotes_cohere PRIVATE -Wl,--start-group ${_archives} -Wl,--end-group log dl m)
 target_link_options(voicenotes_cohere PRIVATE
+    -fopenmp -static-openmp
     "-Wl,-z,max-page-size=16384"
     "-Wl,--gc-sections"
     "-Wl,--exclude-libs,ALL"

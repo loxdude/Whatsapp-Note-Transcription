@@ -1,0 +1,158 @@
+--- a/src/cohere.cpp
++++ b/src/cohere.cpp
+@@ -10,0 +11 @@
++#include "core/ggml_cpu_backend.h"
+@@ -37,0 +39 @@
++#include <string_view>
+@@ -487,0 +490 @@
++    ggml_backend_buffer_t buf_cpu = nullptr;
+@@ -1220,0 +1224,7 @@
++    // Match the tested Q4_0 FFN / IQ4_NL attention encoder layout.
++    const auto file_type = core_gguf::kv_u32(gguf_ctx, "general.file_type", GGML_FTYPE_UNKNOWN);
++    const int64_t first_ffn = gguf_find_tensor(gguf_ctx, "enc.blk.0.ff1.up.weight");
++    const int64_t first_attn = gguf_find_tensor(gguf_ctx, "enc.blk.0.attn.q.weight");
++    const bool repack_encoder = file_type == GGML_FTYPE_MOSTLY_IQ4_NL && first_ffn >= 0 && first_attn >= 0 &&
++                                gguf_get_tensor_type(gguf_ctx, first_ffn) == GGML_TYPE_Q4_0 &&
++                                gguf_get_tensor_type(gguf_ctx, first_attn) == GGML_TYPE_IQ4_NL;
+@@ -1226,2 +1236,16 @@
+-        if (!core_gguf::load_weights(path, backend, "cohere", wl)) {
+-            return false;
++        // Preserve the decoder's weight layout and arithmetic. The loader
++        // repacks only supported 2-D encoder matrices.
++        const auto encoder_matmul = [](const char* name, void*) {
++            const std::string_view key{name};
++            return key.starts_with("enc.") && key.ends_with(".weight");
++        };
++        bool loaded = false;
++        if (repack_encoder && core_cpu_backend::is_cpu(backend)) {
++            loaded = core_gguf::load_weights_repack(path, backend, encoder_matmul, nullptr, "cohere", wl,
++                                                   nullptr, false);
++        }
++        if (!loaded) {
++            core_gguf::free_weights(wl);
++            if (!core_gguf::load_weights(path, backend, "cohere", wl)) {
++                return false;
++            }
+@@ -1230,0 +1255 @@
++        model.buf_cpu = wl.buf_cpu;
+@@ -1234 +1259 @@
+-        if (tp) {
++        if (tp && !(tp->flags & GGML_TENSOR_FLAG_WEIGHT_MATMUL_ONLY)) {
+@@ -1519 +1543,0 @@
+-#include "core/ggml_cpu_backend.h"
+@@ -2114,0 +2139,2 @@
++    if (ctx->model.buf_cpu)
++        core_gguf::release_weight_buffer(ctx->model.buf_cpu);
+@@ -2991 +3017,2 @@
+-    perf.mem_model_buf = ctx->model.buf ? ggml_backend_buffer_get_size(ctx->model.buf) : 0;
++    perf.mem_model_buf = (ctx->model.buf ? ggml_backend_buffer_get_size(ctx->model.buf) : 0) +
++                         (ctx->model.buf_cpu ? ggml_backend_buffer_get_size(ctx->model.buf_cpu) : 0);
+--- a/src/core/gguf_loader.cpp
++++ b/src/core/gguf_loader.cpp
+@@ -19,0 +20 @@
++#include <memory>
+@@ -20,0 +22 @@
++#include <optional>
+@@ -1389 +1391 @@
+-                         const char* model_tag, WeightLoad& out, int* n_repacked) {
++                         const char* model_tag, WeightLoad& out, int* n_repacked, bool mmap_copy) {
+@@ -1500 +1502,3 @@
+-    MappedFile mf(path);
++    std::optional<MappedFile> mf;
++    if (mmap_copy)
++        mf.emplace(path);
+@@ -1502,2 +1506,3 @@
+-    if (!mf.ok) {
+-        FILE* fp = detail::open_read(path);
++    std::unique_ptr<FILE, decltype(&fclose)> fp(nullptr, fclose);
++    if (!mf || !mf->ok) {
++        fp.reset(detail::open_read(path));
+@@ -1505 +1510 @@
+-            fprintf(stderr, "%s: cannot open '%s' for fread fallback\n", tag, path);
++            fprintf(stderr, "%s: unable to read repack source '%s'\n", tag, path);
+@@ -1510,5 +1515,14 @@
+-        std::vector<uint8_t> tbuf;
+-        for (ggml_tensor* t = ggml_get_first_tensor(out.ctx); t; t = ggml_get_next_tensor(out.ctx, t)) {
+-            const int64_t tid = gguf_find_tensor(gctx, ggml_get_name(t));
+-            if (tid < 0)
+-                continue;
++    }
++
++    std::vector<uint8_t> tbuf;
++#if defined(_WIN32)
++    using offset_type = int64_t;
++#else
++    using offset_type = off_t;
++#endif
++    const uint64_t max_offset = std::numeric_limits<offset_type>::max();
++    for (ggml_tensor* t = ggml_get_first_tensor(out.ctx); t; t = ggml_get_next_tensor(out.ctx, t)) {
++        const int64_t tid = gguf_find_tensor(gctx, ggml_get_name(t));
++        const size_t nbytes = ggml_nbytes(t);
++        bool ok = tid >= 0;
++        if (ok) {
+@@ -1516,3 +1530,4 @@
+-            const size_t nbytes = ggml_nbytes(t);
+-            if (tbuf.size() < nbytes)
+-                tbuf.resize(nbytes);
++            if (fp) {
++                ok = data_off <= max_offset && off <= max_offset - data_off;
++                if (ok) {
++                    const auto offset = static_cast<offset_type>(data_off + off);
+@@ -1520,2 +1535 @@
+-            if (_fseeki64(fp, (int64_t)(data_off + off), SEEK_SET) != 0)
+-                break;
++                    ok = _fseeki64(fp.get(), offset, SEEK_SET) == 0;
+@@ -1523,2 +1537 @@
+-            if (fseeko(fp, (off_t)(data_off + off), SEEK_SET) != 0)
+-                break;
++                    ok = fseeko(fp.get(), offset, SEEK_SET) == 0;
+@@ -1526,21 +1539,12 @@
+-            if (fread(tbuf.data(), 1, nbytes, fp) != nbytes)
+-                break;
+-            ggml_backend_tensor_set(t, tbuf.data(), 0, nbytes);
+-        }
+-        fclose(fp);
+-    } else {
+-        for (ggml_tensor* t = ggml_get_first_tensor(out.ctx); t; t = ggml_get_next_tensor(out.ctx, t)) {
+-            const int64_t tid = gguf_find_tensor(gctx, ggml_get_name(t));
+-            if (tid < 0)
+-                continue;
+-            const size_t off = gguf_get_tensor_offset(gctx, tid);
+-            const size_t nbytes = ggml_nbytes(t);
+-            // Same overflow-safe bounds check as the split mmap path.
+-            if (data_off > mf.size || off > mf.size - data_off || nbytes > mf.size - data_off - off) {
+-                fprintf(stderr,
+-                        "%s: repack path: tensor '%s' exceeds file bounds "
+-                        "(off=%zu + nbytes=%zu > file_size=%zu) — file truncated?\n",
+-                        tag, ggml_get_name(t), data_off + off, nbytes, mf.size);
+-                free_weights(out);
+-                gguf_free(gctx);
+-                return false;
++                }
++                if (ok) {
++                    tbuf.resize(nbytes);
++                    ok = fread(tbuf.data(), 1, nbytes, fp.get()) == nbytes;
++                }
++                if (ok)
++                    ggml_backend_tensor_set(t, tbuf.data(), 0, nbytes);
++            } else {
++                ok = data_off <= mf->size && off <= mf->size - data_off &&
++                     nbytes <= mf->size - data_off - off;
++                if (ok)
++                    ggml_backend_tensor_set(t, (const char*)mf->base + data_off + off, 0, nbytes);
+@@ -1548 +1552,6 @@
+-            ggml_backend_tensor_set(t, (const char*)mf.base + data_off + off, 0, nbytes);
++        }
++        if (!ok) {
++            fprintf(stderr, "%s: unable to read repack tensor '%s' from '%s'\n", tag, ggml_get_name(t), path);
++            free_weights(out);
++            gguf_free(gctx);
++            return false;
+--- a/src/core/gguf_loader.h
++++ b/src/core/gguf_loader.h
+@@ -262,0 +263,2 @@
++// With mmap_copy=false, source tensors are read through a reusable buffer
++// bounded by the largest tensor instead of mapping the entire checkpoint.
+@@ -267 +269 @@
+-                         const char* model_tag, WeightLoad& out, int* n_repacked = nullptr);
++                         const char* model_tag, WeightLoad& out, int* n_repacked = nullptr, bool mmap_copy = true);

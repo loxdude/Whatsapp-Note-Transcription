@@ -22,7 +22,8 @@ class ModelSpecsTest {
             assertTrue(spec.url.endsWith("/" + spec.fileName))
             assertTrue(spec.sha256.matches(Regex("[0-9a-f]{64}")))
         }
-        assertEquals(1_510_365_440L, ModelSpecs.COHERE_ARABIC.sizeBytes)
+        assertEquals(1_289_180_672L, ModelSpecs.COHERE_ARABIC.sizeBytes)
+        assertEquals("052fde8b98ee41d33216d5b086af286dc8b8eda61f4ce7eced49550d1658b54d", ModelSpecs.COHERE_ARABIC.sha256)
         assertEquals(ModelSpecs.GEMMA_E2B, ModelSpecs.byId("gemma-e2b"))
         assertNull(ModelSpecs.byId("unknown"))
     }
@@ -55,6 +56,9 @@ class ModelSpecsTest {
     @Test fun localChoicePicksOnlyItsOwnModel() {
         val models = listOf(cloud, parakeet, arabic)
         assertEquals(arabic.id, localModelFor(models, LocalModelChoice.ARABIC)?.id)
+        val previousArabic = arabic.copy(id = CohereArabicModel.LEGACY_MODEL_ID)
+        assertEquals(arabic.id, localModelFor(listOf(previousArabic, arabic), LocalModelChoice.ARABIC)?.id)
+        assertEquals(previousArabic.id, localModelFor(listOf(previousArabic), LocalModelChoice.ARABIC)?.id)
         assertEquals(parakeet.id, localModelFor(models, LocalModelChoice.PARAKEET, selectedId = arabic.id)?.id)
         assertNull(localModelFor(listOf(cloud, parakeet), LocalModelChoice.ARABIC))
         assertNull(localModelFor(listOf(cloud, arabic), LocalModelChoice.PARAKEET))

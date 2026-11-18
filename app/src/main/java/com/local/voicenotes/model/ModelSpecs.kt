@@ -7,13 +7,17 @@ import com.local.voicenotes.translate.TranslationText
 object ModelSpecs {
     val PARAKEET: DownloadSpec = ParakeetUltraDownload.ENCODER_30S
 
-    /** cstr/cohere-transcribe-arabic-07-2026-GGUF, Q4_K imatrix (Apache-2.0). */
+    /**
+     * Hanspeter420/cohere-transcribe-arabic-android-GGUF (Apache-2.0): IQ4_NL with Q4_0 encoder
+     * FFNs, requantized from cstr/cohere-transcribe-arabic-07-2026-GGUF. The native loader repacks
+     * its encoder for the ARM dotprod kernels (about 2x faster than the Q4_K file of 0.7.0).
+     */
     val COHERE_ARABIC = DownloadSpec(
-        url = "https://huggingface.co/cstr/cohere-transcribe-arabic-07-2026-GGUF/resolve/" +
-            "dfd6d279cd26c4a8862e5af601976e5c552e709e/cohere-transcribe-arabic-q4_k-imatrix.gguf",
-        fileName = "cohere-transcribe-arabic-q4_k-imatrix.gguf",
-        sizeBytes = 1_510_365_440L,
-        sha256 = "a8b64ca1273072a99645ba154d3ef52a64ec167a0beca316d7e094cd187e6d96",
+        url = "https://huggingface.co/Hanspeter420/cohere-transcribe-arabic-android-GGUF/resolve/" +
+            "d6c5bd111828d610eaef65d62c94dbd3a3adc771/cohere-transcribe-arabic-iq4nl-q4ffn.gguf",
+        fileName = "cohere-transcribe-arabic-iq4nl-q4ffn.gguf",
+        sizeBytes = 1_289_180_672L,
+        sha256 = "052fde8b98ee41d33216d5b086af286dc8b8eda61f4ce7eced49550d1658b54d",
         id = "cohere-arabic",
         title = "Arabic speech model"
     )
@@ -47,7 +51,9 @@ object ModelSpecs {
 
 /** Record rules for the downloaded Cohere Transcribe Arabic model. */
 object CohereArabicModel {
-    const val MODEL_ID = "download:cohere-transcribe-arabic-q4_k"
+    const val MODEL_ID = "download:cohere-transcribe-arabic-iq4nl-q4ffn"
+    /** The slower Q4_K download of 0.7.0. It keeps working until the new file is downloaded. */
+    const val LEGACY_MODEL_ID = "download:cohere-transcribe-arabic-q4_k"
     const val ARCHITECTURE = "cohere-transcribe-arabic"
     const val BACKEND = "crispasr-cohere-cpu"
     /** The model is an Arabic finetune; it is always prompted with this language. */
